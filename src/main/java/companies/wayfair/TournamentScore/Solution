@@ -1,0 +1,27 @@
+# Write your MySQL query statement below
+select team.team_id, team.team_name, sum(team.num_points) as num_points from
+(
+select team_id, team_name,
+sum(
+	case
+		when m.host_goals > m.guest_goals then 3
+		when m.host_goals = m.guest_goals then 1
+		else 0
+	end
+) as num_points
+from Teams left join Matches m on m.host_team = team_id
+group by team_id
+union all
+select team_id as team_id, team_name,
+sum(
+	case
+		when m.guest_goals > m.host_goals then 3
+		when m.host_goals = m.guest_goals then 1
+		else 0
+	end
+) as num_points
+from Teams left join Matches m on m.guest_team = team_id
+group by team_id
+) as team
+group by team.team_id
+order by num_points desc, team.team_id asc;
