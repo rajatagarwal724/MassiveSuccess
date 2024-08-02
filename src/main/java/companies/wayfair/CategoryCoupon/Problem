@@ -1,0 +1,158 @@
+Given the following set of data sets, create a function that will find the coupon to display for a given category.
+Coupons = [
+{"CategoryName:Comforter Sets", "CouponName:Comforters Sale"},
+{"CategoryName:Bedding", "CouponName:Savings on Bedding"},
+{"CategoryName:Bed & Bath", "CouponName:Low price for Bed & Bath"}
+]
+
+Categories = [
+{"CategoryName:Comforter Sets", "CategoryParentName:Bedding"},
+{"CategoryName:Bedding", "CategoryParentName:Bed & Bath"},
+{"CategoryName:Bed & Bath", "CategoryParentName:None"},
+{"CategoryName:Soap Dispensers", "CategoryParentName:Bathroom Accessories"},
+{"CategoryName:Bathroom Accessories", "CategoryParentName:Bed & Bath"},
+{"CategoryName:Toy Organizers", "CategoryParentName:Baby And Kids"},
+{"CategoryName:Baby And Kids", "CategoryParentName:None}
+]
+
+Requirements/Acceptance Criteria:
+
+Create a function that when passed a Category Name (as a String) will return Coupon Name (as a String)
+Category structure is hierarchical. Categories without coupons inherit their parent's coupon.
+No coupon should be returned if there are no coupons in the Category's hierarchy
+For example: Toy Organizers receives no coupon because there is no coupon in the category hierarchy.
+If a Category has a coupon it should not move up the hierarchy to find its Parent Category (or the Parent's Coupon)
+For example: Comforter sets, should see the coupon for Comforter Sets and NOT Bedding
+Beware of the following examples/edge cases and their expected behaviors:
+Bathroom Accessories should receive the coupon for Bed & Bath because there are no coupons for Bathroom Accessories
+Assumption: Product can only be associated with one category.
+tests: input (CategoryName) => output (CouponName)
+"Comforter Sets" => "Comforters Sale"
+"Bedding" => "Savings on Bedding"
+"Bathroom Accessories" => "Low price for Bed & Bath"
+"Soap Dispensers" => "Low price for Bed & Bath"
+"Toy Organizers" => null
+
+========================================================================================================================================================
+
+Follow-up: 1
+
+Problem Statement:
+The system has added a new piece of data to the coupon - "Date Modified". Use this when resolving any ties (when 1 Category
+has 2+ Coupons).
+
+coupons = [
+{ "CategoryName:Comforter Sets", "CouponName:Comforters Sale", "DateModified:2020-01-01"},
+{ "CategoryName:Comforter Sets", "CouponName:Cozy Comforter Coupon", "DateModified:2021-01-01" },
+{ "CategoryName:Bedding", "CouponName:Best Bedding Bargains", "DateModified": "2019-01-01" },
+{ "CategoryName:Bedding", "CouponName:Savings on Bedding", "DateModified:2019-01-01" },
+{ "CategoryName:Bed & Bath", "CouponName:Low price for Bed & Bath", "DateModified": "2018-01-01" },
+{ "CategoryName:Bed & Bath", "CouponName:Bed & Bath extravaganza", "DateModified": "2019-01-01" },
+{ "CategoryName:Bed & Bath", "CouponName:Big Savings for Bed & Bath", "DateModified:2030-01-01" }
+]
+categories = [
+{"CategoryName:Comforter Sets", "CategoryParentName:Bedding"},
+{"CategoryName:Bedding", "CategoryParentName:Bed & Bath"},
+{"CategoryName:Bed & Bath", "CategoryParentName":None},
+{"CategoryName:Soap Dispensers", "CategoryParentName:Bathroom Accessories"},
+{"CategoryName:Bathroom Accessories", "CategoryParentName:Bed & Bath"},
+{"CategoryName:Toy Organizers", "CategoryParentName:Baby And Kids"},
+{"CategoryName:Baby And Kids", "CategoryParentName:None"}
+]
+
+Requirements/Acceptance Criteria:
+• Create a function that when passed a Category Name (as a String) will return one Coupon Name (as a String)
+• If a Category has more than 1 coupon the Coupon with the most recent DateModified should be returned
+• If a Coupon's DateModified is in the future, it should not be returned
+• Category structure is hierarchical. Categories without coupons inherit their parent's coupon.
+
+tests: input (CategoryName) => output (CouponName)
+"Bed & Bath" => "Bed & Bath extravaganza"
+"Bedding" => "Savings on Bedding" | "Best Bedding Bargains"
+"Bathroom Accessories" => "Bed & Bath extravaganza"
+"Comforter Sets" => "Comforters Sale" | "Cozy Comforter Coupon"
+
+========================================================================================================================================================
+
+Follow-up: 2
+
+Problem Statement:
+The findBestCoupon function is being called billions of times per day while not being a core feature of the site. Can you make the
+function faster?
+Instructions
+
+Copy and Paste the solution from Part 2 as a starting point to work through this exercise.
+
+Requirements/Acceptance Criteria:
+• All Requirements from prior question
+• Code should still pass all of the same prior test cases
+• O(n) is not fast enough come up with a O(1) solution!
+
+========================================================================================================================================================
+
+Follow-up: 3
+
+Problem Statement:
+Now that we know what coupon to show to the user, let's make sure the user can apply the coupon by changing the selling price
+of a Product.
+Format (Category Name, Coupon Name, Date Modified, Discount)
+
+Coupons = [
+{"CategoryName:Comforter Sets", "CouponName:Comforters Sale", "DateModified:2020-01-01","Discount:10%"},
+{"CategoryName:Comforter Sets", "CouponName:Cozy Comforter Coupon", "DateModified:2020-01-01","Discount:$15"},
+{"CategoryName:Bedding", "CouponName:Best Bedding Bargains", "DateModified:2019-01-01","Discount:35%"},
+{"CategoryName:Bedding", "CouponName:Savings on Bedding", "DateModified:2019-01-01","Discount:25%"},
+{"CategoryName:Bed & Bath", "CouponName:Low price for Bed & Bath", "DateModified:2018-01-01","Discount:50%"},
+{"CategoryName:Bed & Bath", "CouponName:Bed & Bath extravaganza", "DateModified:2019-01-01","Discount:75%"}
+]
+
+categories = [
+{"CategoryName:Comforter Sets", "CategoryParentName:Bedding"},
+{"CategoryName:Bedding", "CategoryParentName:Bed & Bath"},
+{"CategoryName:Bed & Bath", "CategoryParentName:None"},
+{"CategoryName:Soap Dispensers", "CategoryParentName:Bathroom Accessories"},
+{"CategoryName:Bathroom Accessories", "CategoryParentName:Bed & Bath"},
+{"CategoryName:Toy Organizers", "CategoryParentName:Baby And Kids"},
+{"CategoryName:Baby And Kids", "CategoryParentName:None"}
+]
+
+products = [
+
+{"ProductName:Cozy Comforter Sets","Price:100.00", "CategoryName:Comforter Sets"},
+{"ProductName:All-in-one Bedding Set", "Price:50.00", "CategoryName:Bedding"},
+{"ProductName:Infinite Soap Dispenser", "Price:500.00" ,"CategoryName:Bathroom Accessories"},
+{"ProductName:Rainbow Toy Box","Price:257.00", "CategoryName:Baby And Kids"}
+]
+
+Requirements/Acceptance Criteria:
+• Function takes a String representing the Product Name
+• Function Returns the discounted price (Product price minus the coupon discount) as a String
+
+tests: inputs => output
+
+"Cozy Comforter" => "90.00" OR "85.00"
+"All-in-one Bedding Set" => "32.50" OR "37.50"
+"Infinite Soap Dispenser" => "125.001
+"Rainbow Tov Box" => "257.00"
+
+Please note that the data set will be provided in the form of a 2D array, allowing you to iterate through it and load the data into an appropriate data structure
+for example, in the first problem statement you will have:
+
+// {categoryName, couponName}
+
+String [][] coupons = {
+	{"Comforter Sets", "Comforters Sale"},
+	{"Bedding", "Savings on Bedding"},
+	{"Bed & Bath", "Low price for Bed & Bath"}
+}
+// {categoryName, categoryParentName}
+
+String [][] categories = {
+	{"Comforter Sets", "Bedding"},
+	{"Bedding", "Bed & Bath"},
+	{"Bed & Bath", null},
+	{"Soap Dispensers", "Bathroom Accessories"},
+	{"Bathroom Accessories", "Bed & Bath"},
+	{"Toy Organizers", "Baby And Kids"},
+	{"Baby And Kids", null}
+}

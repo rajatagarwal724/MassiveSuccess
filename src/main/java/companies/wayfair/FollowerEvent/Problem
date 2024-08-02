@@ -1,0 +1,13 @@
+Given an array of strings where each string describe a event which triggers when a user starts follwoing someone with the event's date and time.
+
+Example string: "JohnDeo||Michele||24-12-2024||23:04" in which JohnDeo starting following Michele on given date and time.
+
+Now multiple questions can be asked from it like
+
+Find the name of all the users who are being followed by more than k user between particular date and time.
+Find the name of all the users who got at least k followers in increasing/decreasing order of the time at which they had k followers.
+
+
+Coupon category type of coding question can be solved easily via parent child hashMap(2 followups ) Round 1
+Round 2 - LLD Vehicle rental (api ,db schema ,entities)(All needed with design choices explained)
+@bhumnay 50 minutes OA one was a djikstra algo question other was a matrix one afair .
