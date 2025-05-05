@@ -1,0 +1,144 @@
+# Inventory Management
+
+Use Cases:-
+Ecommerce (Quick Commerce), Warehouse etc.
+
+Core Requirements:-
+1) Handle million of SKU's across multiple locations, warehouses
+2) Support high read/write throughputs (real time order updates, order reservations)
+3) Prevent Over and Under selling and ensure consistency
+
+Inventory Service
+1) Query Stock Levels
+2) Reserve/Deduct/Release stock
+3) Add/Update Inventory
+
+API's
+
+GET /inventory?sku=123&warehouse-id=abc
+OR
+GET /inventory?sku=123&warehouse-id=[abc,def]
+
+POST /inventory/reserve
+Request
+{
+    orderId/idempotency-key: ID
+    sku: 123,
+    warehouse-id: abc,
+    quantity: 3
+}
+
+Response
+{
+    reservationId: ID
+}
+
+POST /inventory/release
+{
+    reservationId: ID
+}
+
+Let's discuss the Reserve/Hold Pattern
+
+1) User Creates an Order for certain SKUs and quantities
+2) Inventory Service Checks Availability
+3)
+    a) If Available, creates a hold record for each SKU in the reservation DB and updates the available qty in the inventory.
+    b) If Not Available, stops further processing and show the required message to the user
+
+4) Initiates Payment
+    a) If Payment is Successfull
+        -> then confirm(status) the reservation
+        -> Update the inventory 
+    b) If Payment is Unsuccessfull
+        -> then failed(status) the reservation
+        -> Update the Inventory (Replenish)
+    c) If Payment object is stuck (TTL breached)
+        -> then using a job should update the reservation as expired
+        -> Update the Inventory (Replenish)
+
+Inventory DB
+- sku_id           sku_id + warehouse_id Composite Primary Key
+- warehouse_id
+- available_qty - Available Physical Stock (total_qty - reserved_qty)
+- total_qty - Total Physical Stock present in the store (Updated Only when Stock physicaly enters)
+- reserved_qty - Transactional Holds on stock for pending orders, to prevent overselling during holds
+- status - ACTIVE/INACTIVE
+- updated_at - Last Updated Timestamp
+
+Order Placement
+select available_qty from inventory where sku_id='sku123' and warehouse_id='loc123'
+
+Reserve Inventory
+update inventory 
+set 
+available_qty = available_qty - 3,
+reservation_qty = reservation_qty + 3,
+updated_at = Now()
+where sku_id='sku123' and warehouse_id='loc123' and available_qty >= 3
+
+Payment Successfull
+update inventory
+set
+total_qty = total_qty - 3,
+reservation_qty = reservation_qty - 3,
+updated_at = Now()
+where sku_id='sku123' and warehouse_id='loc123'
+
+Payment failed/expired
+update inventory
+set 
+available_qty = available_qty + 3,
+reservation_qty = reservation_qty - 3,
+updated_at = Now()
+where sku_id='sku123' and warehouse_id='loc123'
+
+Reservation DB
+- reservation_id/ORDER_ID idempotency key
+- sku_id
+- warehouse_id
+- qty
+- status (PENDING/HELD/CONFIRMED/CANCELLED/FAILED)
+- created_at Timestamp
+- expires_at Timestamp
+
+Reservation Service acts as central Coordinator (Orchestrated Saga)
+1) Order Service creates an order
+2) Reservation service creates a PENDING record
+3) Reservation Service Calls Inventory service to decrement inventory
+    -> If Success, then Update Reservation to HELD
+    -> If Failed, then Update Reservation to FAILED
+4) If Reservation is HELD Successfully, then proceed for Payment
+    -> If Success, 
+        Update Reservation to CONFIRMED
+        Update Inventory decrement total_qty and release the reserved_qty
+    -> If FAILED,
+        Update Reservation to FAILED
+        Update Inventory increment available_qty and release the reserved_qty
+
+
+[Reservation Service] --> (Create Reservation: PENDING)
+    |
+    v
+[Inventory Service] <-- (Reserve Inventory)
+    |         |
+    |         v
+    |     (If fail, Reservation Service cancels reservation)
+    v
+(Inventory reserved)
+    |
+    v
+[Reservation Service] --> (Update Reservation: HELD)
+    |
+    v
+[Payment Service] --> (Process Payment)
+    |         |
+    |         v
+    |     (If fail, Reservation Service cancels reservation, Inventory Service releases hold)
+    v
+(Payment success)
+    |
+    v
+[Reservation Service] --> (Update Reservation: CONFIRMED)
+[Inventory Service] --> (Finalize deduction)
+

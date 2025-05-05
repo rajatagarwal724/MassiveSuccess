@@ -1,0 +1,16 @@
+QUESTION - 2 Autocomplete Prototype
+
+Complete the implementation of an autocorrect function. Given a search query string,
+the function should return all words which are anagrams.
+Given 2 arrays, words[n], and queries[q], for each query,
+return an array of the strings that are anagrams, sorted alphabetically ascending.
+
+Note: An anagram is any string that can be formed by rearranging the letters of a string.
+Example
+n = 4, q=2
+words = ["duel", "speed", "dule", "cars"],
+queries = ["spede", "deul"]
+
+The only anagram of "spede" is "speed".
+Both "duel" and "dule" are anagrams of "deul".
+Return [["speed"], ["duel", "dule"]].

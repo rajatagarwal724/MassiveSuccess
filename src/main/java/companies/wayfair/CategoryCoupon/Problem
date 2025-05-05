@@ -1,4 +1,6 @@
-Given the following set of data sets, create a function that will find the coupon to display for a given category.
+Java O(1) Code for the below
+Given the following set of data sets, create a function that will find the coupon to
+display for a given category.
 Coupons = [
 {"CategoryName:Comforter Sets", "CouponName:Comforters Sale"},
 {"CategoryName:Bedding", "CouponName:Savings on Bedding"},
@@ -17,10 +19,12 @@ Categories = [
 
 Requirements/Acceptance Criteria:
 
-Create a function that when passed a Category Name (as a String) will return Coupon Name (as a String)
+Create a function that when passed a Category Name (as a String) will return Coupon Name
+(as a String)
 Category structure is hierarchical. Categories without coupons inherit their parent's coupon.
 No coupon should be returned if there are no coupons in the Category's hierarchy
-For example: Toy Organizers receives no coupon because there is no coupon in the category hierarchy.
+For example: Toy Organizers receives no coupon because there is no coupon in the category
+hierarchy.
 If a Category has a coupon it should not move up the hierarchy to find its Parent Category (or the Parent's Coupon)
 For example: Comforter sets, should see the coupon for Comforter Sets and NOT Bedding
 Beware of the following examples/edge cases and their expected behaviors:
@@ -77,8 +81,8 @@ tests: input (CategoryName) => output (CouponName)
 Follow-up: 2
 
 Problem Statement:
-The findBestCoupon function is being called billions of times per day while not being a core feature of the site. Can you make the
-function faster?
+The findBestCoupon function is being called billions of times per day while not being a core feature of the site.
+Can you make the function faster?
 Instructions
 
 Copy and Paste the solution from Part 2 as a starting point to work through this exercise.
@@ -93,8 +97,8 @@ Requirements/Acceptance Criteria:
 Follow-up: 3
 
 Problem Statement:
-Now that we know what coupon to show to the user, let's make sure the user can apply the coupon by changing the selling price
-of a Product.
+Now that we know what coupon to show to the user, let's make sure the user can apply the coupon by changing the selling
+price of a Product.
 Format (Category Name, Coupon Name, Date Modified, Discount)
 
 Coupons = [

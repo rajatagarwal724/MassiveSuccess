@@ -1,0 +1,26 @@
+@startuml
+actor Customer
+participant "Order Service" as Order
+participant "Reservation Service" as Reservation
+participant "Inventory Service" as Inventory
+participant "Payment Service" as Payment
+
+Customer -> Order: Place Order
+Order -> Reservation: Create Reservation (PENDING)
+Reservation -> Inventory: Reserve Inventory
+Inventory --> Reservation: Success/Fail
+alt Success
+    Reservation -> Reservation: Update Reservation (HELD)
+    Reservation -> Payment: Initiate Payment
+    Payment --> Reservation: Payment Success/Fail
+    alt Payment Success
+        Reservation -> Reservation: Update Reservation (CONFIRMED)
+        Reservation -> Inventory: Finalize Deduction
+    else Payment Fail/Timeout
+        Reservation -> Reservation: Update Reservation (FAILED)
+        Reservation -> Inventory: Release Hold
+    end
+else Fail
+    Reservation -> Reservation: Update Reservation (FAILED)
+end
+@enduml
