@@ -1,0 +1,267 @@
+package lld.splitwise;
+
+import java.util.*;
+
+/**
+ * Core Splitwise model – keeps net balances in O(1) per operation.
+ *  • User               – participant
+ *  • Split (Equal/Exact/Percent)
+ *  • Expense            – records payment & splits
+ *  • ExpenseManager     – high-level APIs: addExpense(), showBalances()
+ */
+public class SplitwiseDemo {
+    public static void main(String[] args) {
+        ExpenseManager manager = new ExpenseManager();
+
+        // create users
+        User u1 = manager.addUser("u1", "User1", "u1@email.com");
+        User u2 = manager.addUser("u2", "User2", "u2@email.com");
+        User u3 = manager.addUser("u3", "User3", "u3@email.com");
+
+        // 1. Equal split – u1 pays 300 for u1, u2, u3 (100 each)
+        manager.addExpenseEqual(u1, 300, Arrays.asList(u1, u2, u3), "Lunch");
+
+        // 2. Exact split – u2 pays 125, owes: u1 40, u2 45, u3 40
+        manager.addExpenseExact(u2, 125,
+                Arrays.asList(
+                        new ExactSplit(u1, 40),
+                        new ExactSplit(u2, 45),
+                        new ExactSplit(u3, 40)
+                ), "Cab");
+
+        // 3. Percent split – u3 pays 120, split 40%, 20%, 40%
+        manager.addExpensePercent(u3, 120,
+                Arrays.asList(
+                        new PercentSplit(u1, 40),
+                        new PercentSplit(u2, 20),
+                        new PercentSplit(u3, 40)
+                ), "Dinner");
+
+        System.out.println("\n---- Individual Balances ----");
+        manager.showBalance(u1);
+        manager.showBalance(u2);
+        manager.showBalance(u3);
+
+        System.out.println("\n---- All Balances ----");
+        manager.showBalances();
+
+        System.out.println("\n---- Simplified Settlements ----");
+        manager.showSimplifiedDebts();
+    }
+}
+
+// ==================== MODEL ====================
+class User {
+    private final String id;
+    private final String name;
+    private final String email;
+
+    public User(String id, String name, String email) {
+        this.id = id;
+        this.name = name;
+        this.email = email;
+    }
+
+    public String getId() { return id; }
+    public String getName() { return name; }
+
+    @Override public String toString() { return name; }
+}
+
+abstract class Split {
+    private final User user;
+    private double amount; // computed for Equal / Percent
+
+    protected Split(User user) { this.user = user; }
+    public User getUser() { return user; }
+    public double getAmount() { return amount; }
+    public void setAmount(double amount) { this.amount = amount; }
+}
+
+class EqualSplit extends Split {
+    public EqualSplit(User user) { super(user); }
+}
+
+class ExactSplit extends Split {
+    public ExactSplit(User user, double amount) {
+        super(user);
+        setAmount(amount);
+    }
+}
+
+class PercentSplit extends Split {
+    public PercentSplit(User user, double percent) {
+        super(user);
+        setAmount(percent); // here amount stores % until resolved
+    }
+}
+
+enum ExpenseType {EQUAL, EXACT, PERCENT}
+
+class Expense {
+    private final String id;
+    private final String description;
+    private final User paidBy;
+    private final double amount;
+    private final List<Split> splits;
+    private final ExpenseType type;
+
+    public Expense(String id, String description, User paidBy, double amount, List<Split> splits, ExpenseType type) {
+        this.id = id;
+        this.description = description;
+        this.paidBy = paidBy;
+        this.amount = amount;
+        this.splits = splits;
+        this.type = type;
+        validate();
+        computeSplitAmounts();
+    }
+
+    private void validate() {
+        switch (type) {
+            case EXACT:
+                double sum = splits.stream().mapToDouble(Split::getAmount).sum();
+                if (Math.abs(sum - amount) > 0.01) throw new IllegalArgumentException("Exact splits don't sum to total");
+                break;
+            case PERCENT:
+                double percent = splits.stream().mapToDouble(Split::getAmount).sum();
+                if (Math.abs(percent - 100) > 0.01) throw new IllegalArgumentException("Percent splits don't sum to 100");
+                break;
+            default:
+        }
+    }
+
+    private void computeSplitAmounts() {
+        switch (type) {
+            case EQUAL:
+                double equal = round(amount / splits.size());
+                splits.forEach(s -> s.setAmount(equal));
+                break;
+            case PERCENT:
+                splits.forEach(s -> s.setAmount(round(amount * s.getAmount() / 100.0))); // reuse amount as % from ctor
+                break;
+            default:
+        }
+    }
+
+    private double round(double v) { return Math.round(v * 100.0) / 100.0; }
+    public User getPaidBy() { return paidBy; }
+    public double getAmount() { return amount; }
+    public List<Split> getSplits() { return splits; }
+}
+
+// ==================== MANAGER ====================
+class ExpenseManager {
+    // userId -> User
+    private final Map<String, User> users = new HashMap<>();
+
+    // net balanceMap[from][to] -> amount (>0 means 'from' owes 'to')
+    private final Map<String, Map<String, Double>> balanceMap = new HashMap<>();
+
+    public User addUser(String id, String name, String email) {
+        User u = new User(id, name, email);
+        users.put(id, u);
+        return u;
+    }
+
+    // ============ Public Add Expense APIs ============
+    public void addExpenseEqual(User paidBy, double amount, List<User> participants, String desc) {
+        List<Split> splits = new ArrayList<>();
+        participants.forEach(p -> splits.add(new EqualSplit(p)));
+        addExpense(paidBy, amount, splits, ExpenseType.EQUAL, desc);
+    }
+
+    public void addExpenseExact(User paidBy, double amount, List<ExactSplit> splits, String desc) {
+        addExpense(paidBy, amount, new ArrayList<>(splits), ExpenseType.EXACT, desc);
+    }
+
+    public void addExpensePercent(User paidBy, double amount, List<PercentSplit> splits, String desc) {
+        addExpense(paidBy, amount, new ArrayList<>(splits), ExpenseType.PERCENT, desc);
+    }
+
+    // ============ Core Logic ============
+    private void addExpense(User paidBy, double amount, List<Split> splits, ExpenseType type, String desc) {
+        Expense expense = new Expense(UUID.randomUUID().toString(), desc, paidBy, amount, splits, type);
+        updateBalances(expense);
+    }
+
+    private void updateBalances(Expense expense) {
+        for (Split split : expense.getSplits()) {
+            String owedId = split.getUser().getId();
+            String paidId = expense.getPaidBy().getId();
+            double amount = split.getAmount();
+            addBalance(owedId, paidId, amount);
+        }
+    }
+
+    // Maintains anti-symmetric matrix
+    private void addBalance(String from, String to, double amount) {
+        if (from.equals(to) || amount == 0) return;
+
+        balanceMap.putIfAbsent(from, new HashMap<>());
+        balanceMap.putIfAbsent(to, new HashMap<>());
+
+        double fromPrev = balanceMap.getOrDefault(from, Collections.emptyMap()).getOrDefault(to, 0.0);
+        double toPrev = balanceMap.getOrDefault(to, Collections.emptyMap()).getOrDefault(from, 0.0);
+        double net = round(toPrev - fromPrev + amount); // consolidate opposite directions
+
+        if (net >= 0) {
+            balanceMap.get(from).put(to, 0.0);
+            balanceMap.get(to).put(from, net);
+        } else {
+            balanceMap.get(to).put(from, 0.0);
+            balanceMap.get(from).put(to, -net);
+        }
+    }
+
+    // ============ Query APIs ============
+    public void showBalance(User user) {
+        Map<String, Double> map = balanceMap.getOrDefault(user.getId(), Collections.emptyMap());
+        boolean none = true;
+        for (Map.Entry<String, Double> e : map.entrySet()) {
+            if (e.getValue() > 0) {
+                none = false;
+                System.out.printf("%s owes %s : %.2f\n", user, users.get(e.getKey()), e.getValue());
+            }
+        }
+        if (none) System.out.printf("%s has no balances\n", user);
+    }
+
+    public void showBalances() {
+        for (String uid : users.keySet()) showBalance(users.get(uid));
+    }
+
+    /** Greedy settle-up producing minimal transactions (O(n log n)) */
+    public void showSimplifiedDebts() {
+        PriorityQueue<Pair> pos = new PriorityQueue<>(Comparator.comparingDouble(p -> -p.amount)); // creditor
+        PriorityQueue<Pair> neg = new PriorityQueue<>(Comparator.comparingDouble(p -> -p.amount)); // debtor (negative)
+
+        for (Map.Entry<String, Map<String, Double>> row : balanceMap.entrySet()) {
+            double net = 0;
+            for (double v : row.getValue().values()) net -= v; // owes others positive
+            for (Map.Entry<String, Map<String, Double>> inner : balanceMap.entrySet()) {
+                net += inner.getValue().getOrDefault(row.getKey(), 0.0);
+            }
+            if (net > 0.01) pos.add(new Pair(row.getKey(), net));
+            else if (net < -0.01) neg.add(new Pair(row.getKey(), net));
+        }
+
+        while (!pos.isEmpty() && !neg.isEmpty()) {
+            Pair creditor = pos.poll();
+            Pair debtor = neg.poll();
+            double settle = Math.min(creditor.amount, -debtor.amount);
+            creditor.amount -= settle;
+            debtor.amount += settle;
+            System.out.printf("%s pays %s : %.2f\n", users.get(debtor.userId), users.get(creditor.userId), settle);
+            if (creditor.amount > 0.01) pos.add(creditor);
+            if (debtor.amount < -0.01) neg.add(debtor);
+        }
+    }
+
+    private static double round(double v) { return Math.round(v * 100.0) / 100.0; }
+
+    private static class Pair {
+        String userId; double amount;
+        Pair(String id, double amt) { this.userId = id; this.amount = amt; }
+    }
+}

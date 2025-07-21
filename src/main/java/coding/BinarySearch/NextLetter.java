@@ -22,6 +22,29 @@ public class NextLetter {
         return letters[left % letters.length];
     }
 
+    public Character searchPrevLetter(char[] arr, char key) {
+        if (key > arr[arr.length - 1]) {
+            return arr[arr.length - 1];
+        }
+
+        int left = 0, right = arr.length - 1;
+        char res = arr[0];
+
+        while (left <= right) {
+            int mid = left + (right - left)/2;
+
+            if (arr[mid] == key) {
+                return key;
+            } else if (arr[mid] < key) {
+                res = arr[mid];
+                left = mid + 1;
+            } else {
+                right = mid - 1;
+            }
+        }
+        return res;
+    }
+
     public static void main(String[] args) {
         NextLetter sol = new NextLetter();
 //        System.out.println(sol.searchNextLetter(
@@ -32,8 +55,26 @@ public class NextLetter {
 //                new char[] { 'a', 'c', 'f', 'h' }, 'm'));
 //        System.out.println(sol.searchNextLetter(
 //                new char[] { 'a', 'c', 'f', 'h' }, 'h'));
+//
+//        System.out.println(sol.searchNextLetter(
+//                new char[] { 'a', 'b' }, 'a'));
+//
+//
+//
 
-        System.out.println(sol.searchNextLetter(
+        System.out.println(sol.searchPrevLetter(
+                new char[] { 'a', 'c', 'f', 'h' }, 'f'));
+        System.out.println(sol.searchPrevLetter(
+                new char[] { 'a', 'c', 'f', 'h' }, 'b'));
+        System.out.println(sol.searchPrevLetter(
+                new char[] { 'a', 'c', 'f', 'h' }, 'm'));
+        System.out.println(sol.searchPrevLetter(
+                new char[] { 'a', 'c', 'f', 'h' }, 'h'));
+
+        System.out.println(sol.searchPrevLetter(
                 new char[] { 'a', 'b' }, 'a'));
+
+        System.out.println(sol.searchPrevLetter(
+                new char[] { 'b', 'c' }, 'a'));
     }
 }

@@ -1,0 +1,152 @@
+class Task {
+    private UUID id;
+    private String title;
+    private String description;
+    private User assignee;
+    private User creator;
+    private TaskStatus status;
+    private TaskPriority priority;
+    private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
+    private LocalDateTime dueDate;
+    private Category category;
+    private List<Comment> comments;
+    
+    // Constructor, getters, setters
+}
+
+class User {
+    private UUID id;
+    private String username;
+    private String email;
+    private String name;
+    
+    // Constructor, getters, setters
+}
+
+class Comment {
+    private UUID id;
+    private String content;
+    private User author;
+    private LocalDateTime createdAt;
+    
+    // Constructor, getters, setters
+}
+
+class Category {
+    private UUID id;
+    private String name;
+    private String description;
+    private Color color; // Optional: for visual representation in UI
+    
+    // Constructor, getters, setters
+}
+
+enum TaskStatus {
+    TODO, IN_PROGRESS, UNDER_REVIEW, DONE, ARCHIVED
+}
+
+enum TaskPriority {
+    LOW, MEDIUM, HIGH, CRITICAL
+}
+
+enum NotificationType {
+    TASK_CREATED, TASK_ASSIGNED, TASK_UPDATED, TASK_COMMENTED, DUE_DATE_APPROACHING
+}
+
+class UserManager {
+    private final ConcurrentHashMap<UUID, User> users;
+    
+    public Optional<User> getUserById(UUID id) { ... }
+    public User createUser(String username, String email, String name) { ... }
+    public List<User> getAllUsers() { ... }
+}
+
+class TaskManager {
+    private final ConcurrentHashMap<UUID, Task> tasks;
+    private final NotificationService notificationService;
+    
+    // CRUD operations
+    public Task createTask(String title, String description, User creator, TaskPriority priority) { ... }
+    public Optional<Task> getTaskById(UUID id) { ... }
+    public List<Task> getTasksByUser(UUID userId) { ... }
+    public List<Task> getTasksByCategory(UUID categoryId) { ... }
+    public List<Task> getTasksByStatus(TaskStatus status) { ... }
+    
+    // Task operations
+    public void assignTask(UUID taskId, UUID userId) { ... }
+    public void updateTaskStatus(UUID taskId, TaskStatus status) { ... }
+    public void updateTaskPriority(UUID taskId, TaskPriority priority) { ... }
+    public void setTaskDueDate(UUID taskId, LocalDateTime dueDate) { ... }
+    public void addComment(UUID taskId, String content, User author) { ... }
+    public void setCategory(UUID taskId, Category category) { ... }
+}
+
+class CategoryManager {
+    private final ConcurrentHashMap<UUID, Category> categories;
+    
+    public Category createCategory(String name, String description) { ... }
+    public Optional<Category> getCategoryById(UUID id) { ... }
+    public List<Category> getAllCategories() { ... }
+}
+
+interface NotificationObserver {
+    void onNotify(Notification notification);
+}
+
+class Notification {
+    private UUID id;
+    private NotificationType type;
+    private String message;
+    private Task task;
+    private User user;
+    private LocalDateTime timestamp;
+    
+    // Constructor, getters
+}
+
+class NotificationService {
+    private final ConcurrentHashMap<UUID, Set<NotificationObserver>> observers;
+    
+    public void subscribe(UUID userId, NotificationObserver observer) { ... }
+    public void unsubscribe(UUID userId, NotificationObserver observer) { ... }
+    public void notifyTaskCreated(Task task) { ... }
+    public void notifyTaskAssigned(Task task, User previousAssignee) { ... }
+    public void notifyTaskUpdated(Task task, String updateDetails) { ... }
+    public void notifyTaskCommented(Task task, Comment comment) { ... }
+    public void notifyDueDateApproaching(Task task) { ... }
+}
+
+class TaskManagementSystem {
+    private final UserManager userManager;
+    private final TaskManager taskManager;
+    private final CategoryManager categoryManager;
+    private final NotificationService notificationService;
+    
+    // Constructor with dependency injection
+    
+    // User operations delegated to UserManager
+    // Task operations delegated to TaskManager
+    // Category operations delegated to CategoryManager
+    // Notification operations delegated to NotificationService
+    
+    // Additional system-level operations
+    public List<Task> searchTasks(String query) { ... }
+    public Map<TaskStatus, List<Task>> getTasksSummary() { ... }
+    public List<Task> getOverdueTasks() { ... }
+}
+
+class TaskManagementException extends RuntimeException {
+    private ErrorCode errorCode;
+    
+    // Constructor, getters
+}
+
+enum ErrorCode {
+    TASK_NOT_FOUND,
+    USER_NOT_FOUND,
+    CATEGORY_NOT_FOUND,
+    INVALID_TASK_STATE_TRANSITION,
+    UNAUTHORIZED_OPERATION,
+    // other error codes
+}

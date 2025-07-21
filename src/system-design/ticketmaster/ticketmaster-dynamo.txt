@@ -1,0 +1,539 @@
+# DynamoDB Schema Design for Ticketmaster/BookMyShow
+
+## Overview of NoSQL Approach
+
+DynamoDB requires a fundamentally different data modeling approach compared to relational databases. This document outlines a production-grade DynamoDB schema that addresses:
+
+- High write throughput (ticket reservations, purchases)
+- High read throughput (browsing events, viewing bookings)
+- Access patterns optimization
+- Consistent performance with scale
+- Cost optimization
+
+## Core Design Principles
+
+1. **Denormalization**: Pre-join data to avoid costly queries
+2. **Single-table design**: Leverage composite keys and sparse indexes
+3. **Sort key overloading**: Use consistent prefixes to organize related items
+4. **Global Secondary Indexes (GSIs)**: Create for specific access patterns
+5. **TTL**: Manage data lifecycle efficiently
+
+## Primary Table Structure
+
+```json
+// TicketingService Table (Single Table Design)
+{
+  "TableName": "TicketingService",
+  "KeySchema": [
+    { "AttributeName": "PK", "KeyType": "HASH" },
+    { "AttributeName": "SK", "KeyType": "RANGE" }
+  ],
+  "AttributeDefinitions": [
+    { "AttributeName": "PK", "AttributeType": "S" },
+    { "AttributeName": "SK", "AttributeType": "S" },
+    { "AttributeName": "GSI1PK", "AttributeType": "S" },
+    { "AttributeName": "GSI1SK", "AttributeType": "S" },
+    { "AttributeName": "GSI2PK", "AttributeType": "S" },
+    { "AttributeName": "GSI2SK", "AttributeType": "S" },
+    { "AttributeName": "GSI3PK", "AttributeType": "S" },
+    { "AttributeName": "GSI3SK", "AttributeType": "S" }
+  ],
+  "GlobalSecondaryIndexes": [
+    {
+      "IndexName": "GSI1",
+      "KeySchema": [
+        { "AttributeName": "GSI1PK", "KeyType": "HASH" },
+        { "AttributeName": "GSI1SK", "KeyType": "RANGE" }
+      ],
+      "Projection": { "ProjectionType": "ALL" }
+    },
+    {
+      "IndexName": "GSI2",
+      "KeySchema": [
+        { "AttributeName": "GSI2PK", "KeyType": "HASH" },
+        { "AttributeName": "GSI2SK", "KeyType": "RANGE" }
+      ],
+      "Projection": { "ProjectionType": "ALL" }
+    },
+    {
+      "IndexName": "GSI3",
+      "KeySchema": [
+        { "AttributeName": "GSI3PK", "KeyType": "HASH" },
+        { "AttributeName": "GSI3SK", "KeyType": "RANGE" }
+      ],
+      "Projection": { "ProjectionType": "ALL" }
+    }
+  ],
+  "BillingMode": "PAY_PER_REQUEST"
+}
+```
+
+## Entity Design and Access Patterns
+
+### 1. User Entity
+
+```json
+// User Item
+{
+  "PK": "USER#12345",
+  "SK": "PROFILE#",
+  "GSI1PK": "EMAIL#user@example.com",
+  "GSI1SK": "USER#",
+  "Type": "User",
+  "UserId": "12345",
+  "Name": "John Doe",
+  "Email": "user@example.com",
+  "Phone": "+1234567890",
+  "CreatedAt": "2023-05-10T12:00:00Z",
+  "LastLogin": "2023-05-15T09:30:00Z"
+}
+```
+
+**Access Patterns:**
+- Get user by ID: Query on PK="USER#12345", SK="PROFILE#"
+- Get user by email: Query GSI1 with GSI1PK="EMAIL#user@example.com"
+- User authentication: Same as above
+
+### 2. Venue Entity
+
+```json
+// Venue Item
+{
+  "PK": "VENUE#V789",
+  "SK": "METADATA#",
+  "GSI1PK": "CITY#NEW_YORK",
+  "GSI1SK": "VENUE#V789",
+  "Type": "Venue",
+  "VenueId": "V789",
+  "Name": "Madison Square Garden",
+  "Address": "4 Pennsylvania Plaza",
+  "City": "NEW_YORK",
+  "State": "NY",
+  "Country": "USA",
+  "Capacity": 20000,
+  "GeoLocation": {
+    "Latitude": 40.7505,
+    "Longitude": -73.9934
+  }
+}
+
+// Venue Seat Section (One item per section)
+{
+  "PK": "VENUE#V789",
+  "SK": "SECTION#A1",
+  "Type": "VenueSection",
+  "SectionName": "A1",
+  "SectionType": "VIP",
+  "SeatCount": 200,
+  "PriceCategory": "PREMIUM"
+}
+```
+
+**Access Patterns:**
+- Get venue by ID: Query on PK="VENUE#V789", SK begins_with "METADATA#"
+- Get venue sections: Query on PK="VENUE#V789", SK begins_with "SECTION#"
+- Find venues by city: Query GSI1 with GSI1PK="CITY#NEW_YORK"
+
+### 3. Event Entity
+
+```json
+// Event Item
+{
+  "PK": "EVENT#E456",
+  "SK": "METADATA#",
+  "GSI1PK": "VENUE#V789",
+  "GSI1SK": "EVENT#2023-06-15#E456",
+  "GSI2PK": "CATEGORY#CONCERT",
+  "GSI2SK": "DATE#2023-06-15#E456",
+  "Type": "Event",
+  "EventId": "E456",
+  "Name": "Summer Concert Series",
+  "Description": "Annual summer concert featuring top artists",
+  "VenueId": "V789",
+  "VenueName": "Madison Square Garden", // Denormalized
+  "Category": "CONCERT",
+  "StartDate": "2023-06-15",
+  "EndDate": "2023-06-15",
+  "Status": "SCHEDULED",
+  "ImageUrl": "https://example.com/images/event-e456.jpg",
+  "CreatedAt": "2023-05-01T10:00:00Z"
+}
+
+// Event-Performer Relationship
+{
+  "PK": "EVENT#E456",
+  "SK": "PERFORMER#P123",
+  "Type": "EventPerformer",
+  "PerformerId": "P123",
+  "PerformerName": "Famous Band", // Denormalized
+  "PerformerType": "BAND",
+  "HeadLiner": true,
+  "PerformanceOrder": 1
+}
+
+// Showtimes for Event
+{
+  "PK": "EVENT#E456",
+  "SK": "SHOWTIME#ST1",
+  "GSI1PK": "DATE#2023-06-15",
+  "GSI1SK": "TIME#19:30#EVENT#E456",
+  "Type": "Showtime",
+  "ShowtimeId": "ST1",
+  "EventId": "E456",
+  "StartTime": "2023-06-15T19:30:00Z",
+  "EndTime": "2023-06-15T22:30:00Z",
+  "DoorsOpen": "2023-06-15T18:00:00Z",
+  "Status": "SCHEDULED",
+  "TotalSeats": 20000,
+  "AvailableSeats": 18500,
+  "ReservedSeats": 1500,
+  "SoldSeats": 0
+}
+```
+
+**Access Patterns:**
+- Get event details: Query on PK="EVENT#E456", SK="METADATA#"
+- Get event performers: Query on PK="EVENT#E456", SK begins_with "PERFORMER#"
+- Get event showtimes: Query on PK="EVENT#E456", SK begins_with "SHOWTIME#"
+- Find events by venue: Query GSI1 with GSI1PK="VENUE#V789"
+- Find events by category and date: Query GSI2 with GSI2PK="CATEGORY#CONCERT" and GSI2SK begins_with "DATE#2023-06"
+- Find events by date: Query GSI1 with GSI1PK="DATE#2023-06-15"
+
+### 4. Pricing Entity (Dynamic Pricing)
+
+```json
+// Pricing for specific showtime and section
+{
+  "PK": "SHOWTIME#ST1",
+  "SK": "PRICE#SECTION#A1",
+  "Type": "Pricing",
+  "ShowtimeId": "ST1",
+  "EventId": "E456", // Denormalized
+  "SectionId": "A1",
+  "SectionType": "VIP", // Denormalized
+  "BasePrice": 150.00,
+  "CurrentPrice": 175.50, // Dynamic pricing
+  "Currency": "USD",
+  "ServiceFee": 15.00,
+  "TaxPercentage": 8.5,
+  "ValidFrom": "2023-05-10T00:00:00Z",
+  "ValidTo": "2023-06-15T19:30:00Z",
+  "LastUpdated": "2023-05-20T14:30:00Z"
+}
+```
+
+**Access Patterns:**
+- Get all pricing for a showtime: Query on PK="SHOWTIME#ST1", SK begins_with "PRICE#"
+- Get pricing for specific section: Query on PK="SHOWTIME#ST1", SK="PRICE#SECTION#A1"
+
+### 5. Ticket Entity
+
+```json
+// Ticket Item (One per seat)
+{
+  "PK": "SHOWTIME#ST1",
+  "SK": "TICKET#T1001",
+  "GSI1PK": "SECTION#A1",
+  "GSI1SK": "SEAT#ROW5#SEAT10",
+  "Type": "Ticket",
+  "TicketId": "T1001",
+  "ShowtimeId": "ST1",
+  "EventId": "E456", // Denormalized
+  "SectionId": "A1",
+  "Row": "5",
+  "SeatNumber": "10",
+  "Status": "AVAILABLE", // AVAILABLE, RESERVED, SOLD, CANCELLED
+  "ReservationId": null,
+  "ReservedAt": null,
+  "ReservationExpiry": null,
+  "BookingId": null,
+  "Price": 175.50,
+  "PriceId": "P789", // Reference to price used at time of sale
+  "CreatedAt": "2023-05-01T12:00:00Z"
+}
+```
+
+**Access Patterns:**
+- Get all tickets for a showtime: Query on PK="SHOWTIME#ST1", SK begins_with "TICKET#"
+- Find tickets by section and seat: Query GSI1 with GSI1PK="SECTION#A1"
+- Check seat availability: Same as above
+
+### 6. Booking Entity
+
+```json
+// Booking Header
+{
+  "PK": "USER#12345",
+  "SK": "BOOKING#B8901",
+  "GSI1PK": "BOOKING#B8901",
+  "GSI1SK": "METADATA#",
+  "GSI2PK": "EVENT#E456",
+  "GSI2SK": "USER#12345#BOOKING#B8901",
+  "Type": "Booking",
+  "BookingId": "B8901",
+  "UserId": "12345",
+  "UserEmail": "user@example.com", // Denormalized
+  "UserPhone": "+1234567890", // Denormalized
+  "EventId": "E456",
+  "EventName": "Summer Concert Series", // Denormalized
+  "ShowtimeId": "ST1",
+  "ShowtimeStart": "2023-06-15T19:30:00Z", // Denormalized
+  "BookingTime": "2023-05-20T14:35:00Z",
+  "Status": "CONFIRMED", // PENDING, CONFIRMED, CANCELLED
+  "TotalAmount": 351.00,
+  "TicketCount": 2,
+  "PaymentId": "PAY123",
+  "PaymentStatus": "COMPLETED",
+  "TTL": 1718566200 // Unix timestamp for auto-deletion after event (e.g., 1 year)
+}
+
+// Booking Ticket (Relationship table)
+{
+  "PK": "BOOKING#B8901",
+  "SK": "TICKET#T1001",
+  "Type": "BookingTicket",
+  "TicketId": "T1001",
+  "SectionId": "A1",
+  "Row": "5",
+  "SeatNumber": "10",
+  "Price": 175.50,
+  "TTL": 1718566200 // Same as booking header
+}
+```
+
+**Access Patterns:**
+- Get all bookings for a user: Query on PK="USER#12345", SK begins_with "BOOKING#"
+- Get booking details: Query on GSI1PK="BOOKING#B8901", GSI1SK="METADATA#"
+- Get tickets in a booking: Query on PK="BOOKING#B8901", SK begins_with "TICKET#"
+- Find bookings by event: Query GSI2 with GSI2PK="EVENT#E456"
+
+### 7. Payment Entity
+
+```json
+// Payment Item
+{
+  "PK": "USER#12345",
+  "SK": "PAYMENT#PAY123",
+  "GSI1PK": "BOOKING#B8901",
+  "GSI1SK": "PAYMENT#PAY123",
+  "Type": "Payment",
+  "PaymentId": "PAY123",
+  "UserId": "12345",
+  "BookingId": "B8901",
+  "Amount": 351.00,
+  "Currency": "USD",
+  "Status": "COMPLETED",
+  "PaymentMethod": "CREDIT_CARD",
+  "CardLast4": "1234",
+  "TransactionId": "TXN987654321",
+  "PaymentTime": "2023-05-20T14:35:30Z",
+  "RefundStatus": null,
+  "RefundAmount": null,
+  "RefundTime": null,
+  "TTL": 1750102200 // Unix timestamp for compliance period (e.g., 7 years)
+}
+```
+
+**Access Patterns:**
+- Get user payment history: Query on PK="USER#12345", SK begins_with "PAYMENT#"
+- Get payment for a booking: Query GSI1 with GSI1PK="BOOKING#B8901", GSI1SK begins_with "PAYMENT#"
+
+## Additional Tables
+
+### Inventory Control Table (Optimized for High-Concurrency)
+
+```json
+// Inventory Table (Separate table optimized for atomic counters)
+{
+  "TableName": "TicketInventory",
+  "KeySchema": [
+    { "AttributeName": "ShowtimeId", "KeyType": "HASH" },
+    { "AttributeName": "SectionId", "KeyType": "RANGE" }
+  ],
+  "AttributeDefinitions": [
+    { "AttributeName": "ShowtimeId", "AttributeType": "S" },
+    { "AttributeName": "SectionId", "AttributeType": "S" }
+  ],
+  "BillingMode": "PROVISIONED",
+  "ProvisionedThroughput": {
+    "ReadCapacityUnits": 100,
+    "WriteCapacityUnits": 100
+  }
+}
+
+// Inventory Item
+{
+  "ShowtimeId": "ST1",
+  "SectionId": "A1",
+  "TotalSeats": 200,
+  "AvailableSeats": 180,
+  "ReservedSeats": 20,
+  "SoldSeats": 0,
+  "LastUpdated": "2023-05-20T14:30:00Z"
+}
+```
+
+**Usage Notes:**
+- Atomic counters used for inventory control
+- UpdateItem with conditional expressions to prevent overselling
+- High provisioned capacity for on-sale traffic
+
+### Lock Table (For Distributed Locking)
+
+```json
+// LockTable for seat reservation locking
+{
+  "TableName": "TicketLocks",
+  "KeySchema": [
+    { "AttributeName": "LockKey", "KeyType": "HASH" }
+  ],
+  "AttributeDefinitions": [
+    { "AttributeName": "LockKey", "AttributeType": "S" }
+  ],
+  "BillingMode": "PROVISIONED",
+  "ProvisionedThroughput": {
+    "ReadCapacityUnits": 200,
+    "WriteCapacityUnits": 200
+  }
+}
+
+// Lock Item
+{
+  "LockKey": "TICKET#T1001",
+  "Owner": "SESSION#S12345",
+  "AcquiredAt": "2023-05-20T14:29:30Z",
+  "ExpiresAt": "2023-05-20T14:34:30Z", // 5-minute reservation window
+  "TTL": 1684594470 // Unix timestamp for auto-expiration
+}
+```
+
+**Usage Notes:**
+- Used for optimistic concurrency control on ticket reservations
+- TTL for automatic lock expiration
+- ConditionalExpressions used for distributed locking pattern
+
+## Partitioning Strategy and Scaling
+
+DynamoDB automatically scales based on your partitioning strategy. The design above uses:
+
+1. **Evenly distributed partition keys**: Using entity IDs with prefixes
+2. **Write sharding**: For high-write entities like tickets during on-sales, add a shard suffix
+3. **Time-based partitioning**: For high-volume historical data (GSI3 uses YYYY-MM to partition old data)
+
+### Example of Write Sharding for High-Volume Events
+
+```json
+// Sharded Ticket (for mega-events)
+{
+  "PK": "SHOWTIME#ST1#SHARD1", // Add random shard (1-10) to distribute writes
+  "SK": "TICKET#T1001",
+  ... // Other attributes remain the same
+}
+```
+
+## Advanced Patterns
+
+### Optimistic Concurrency Control
+
+For ticket reservations:
+
+```javascript
+// Pseudocode for ticket reservation
+try {
+  const result = await documentClient.update({
+    TableName: "TicketingService",
+    Key: {
+      PK: "SHOWTIME#ST1",
+      SK: "TICKET#T1001"
+    },
+    ConditionExpression: "attribute_exists(PK) AND Status = :available",
+    UpdateExpression: "SET Status = :reserved, ReservationId = :resId, ReservedAt = :now, ReservationExpiry = :expiry",
+    ExpressionAttributeValues: {
+      ":available": "AVAILABLE",
+      ":reserved": "RESERVED",
+      ":resId": "R12345",
+      ":now": new Date().toISOString(),
+      ":expiry": new Date(Date.now() + 5*60000).toISOString() // 5 minutes from now
+    },
+    ReturnValues: "ALL_NEW"
+  }).promise();
+} catch (error) {
+  if (error.code === "ConditionalCheckFailedException") {
+    // Ticket already reserved or sold
+  }
+}
+```
+
+### Transaction Support
+
+For booking confirmation:
+
+```javascript
+// Pseudocode for transaction when confirming booking
+const transactionItems = [
+  {
+    Update: {
+      TableName: "TicketingService",
+      Key: { PK: "USER#12345", SK: "BOOKING#B8901" },
+      UpdateExpression: "SET Status = :confirmed",
+      ExpressionAttributeValues: { ":confirmed": "CONFIRMED" }
+    }
+  },
+  {
+    Update: {
+      TableName: "TicketingService",
+      Key: { PK: "SHOWTIME#ST1", SK: "TICKET#T1001" },
+      UpdateExpression: "SET Status = :sold, BookingId = :bookingId",
+      ExpressionAttributeValues: { ":sold": "SOLD", ":bookingId": "B8901" }
+    }
+  },
+  // More updates for other tickets, inventory adjustments, etc.
+];
+
+await documentClient.transactWrite({ TransactItems: transactionItems }).promise();
+```
+
+## Additional Considerations
+
+### 1. TTL Strategy
+
+- Apply TTL to bookings, payments, and locks for automatic cleanup
+- Different retention periods based on business requirements and compliance
+
+### 2. Backup and Recovery
+
+- Point-in-time recovery enabled for critical tables
+- Regular backups to S3 for long-term retention
+
+### 3. Encryption
+
+- Server-side encryption enabled for all tables
+- Client-side encryption for sensitive payment data
+
+### 4. Multi-Region Strategy
+
+- Global tables for multi-region availability
+- Active-active configuration for disaster recovery
+
+### 5. Cost Optimization
+
+- Provisioned capacity with auto-scaling for predictable traffic
+- On-demand capacity for unpredictable traffic patterns
+- TTL to reduce storage costs for expired data
+- GSI projections limited to required attributes where possible
+
+## Performance Characteristics
+
+- Single-digit millisecond response times for standard operations
+- Scales to handle 20,000+ concurrent ticket reservations
+- Efficiently handles high-read traffic during browsing
+- Optimized for handling flash-sale events with controlled admission rates
+
+## Best Practices for Implementation
+
+1. Use batch operations for initial data loading
+2. Implement idempotent API endpoints for retry safety
+3. Add version attributes for concurrency control
+4. Implement connection pooling for DynamoDB clients
+5. Employ caching (DAX or application-level) for hot data
+6. Stream table changes to Lambda for real-time analytics and notifications

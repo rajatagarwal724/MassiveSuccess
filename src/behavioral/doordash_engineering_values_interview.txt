@@ -1,0 +1,75 @@
+# DoorDash Engineering Values Interview – Preparation Guide
+
+## Overview
+A behavioral conversation with an Engineering Manager that validates your prior experience, lessons learned, 
+and—most importantly—your alignment with DoorDash’s Mission & Values.  
+DoorDash looks for teammates who will champion its principles and help the company get **1% better every day**.
+
+Duration: **45–60 min**  •  Format: Conversational Q&A driven by real anecdotes  •  Focus: Depth over breadth, clarity over buzz-words
+
+---
+## DoorDash Mission & Principles (⚡ Quick Ref)
+1. **Make Room at the Table** – Build inclusive products and teams.  
+2. **Think Outside the Room** – Put customers first; cultivate broad perspective.  
+3. **One Percent Better Every Day** – Relentless, data-driven improvement.  
+4. **Make Today Count** – Bias for action; deliver results that matter.
+
+Read the full descriptions: <https://careers.doordash.com/mission-values>
+
+---
+## Evaluation Pillars & Prep Framework
+| Pillar | What the Interviewer Probes | Your Prep Checklist |
+|--------|----------------------------|---------------------|
+| **Relevant Experience** | Match between your past scope and DoorDash engineering challenges (scalability, latency, ownership of services, cross-team collaboration). | • Select 2–3 projects that mirror marketplace, logistics, data, or consumer-scale problems.<br>• Be ready to quantify impact (latency %, cost $, adoption %). |
+| **Ownership** | Times you took responsibility end-to-end, drove decisions, and ensured success—even beyond your job description. | • Prepare a story where you identified a gap and led the fix.<br>• Highlight trade-offs, stakeholder alignment, and post-launch learning. |
+| **Make Room at the Table** | Actions you took to create an inclusive, collaborative culture. | • Examples: onboarding plans, mentorship, advocating for quieter voices, improving review processes.<br>• Show measurable cultural impact (eNPS, retention, velocity). |
+| **1% Better** | Continuous improvement mindset—for yourself and the product. | • Illustrate a habit of retrospectives, metrics, small iterations.<br>• Show personal growth plan (courses, reading, stretch projects) and how you uplift others. |
+
+---
+## STAR Story Bank Template
+Fill at least **two** stories per pillar.
+
+> **Situation:**  
+> **Task:**  
+> **Action:**  
+> **Result (+Learnings):**
+
+Use numbers to demonstrate scale: *“cut p90 latency from 450 ms → 120 ms (−73%) in six weeks.”*
+
+---
+## Sample Questions
+### Relevant Experience
+1. Walk me through the most technically challenging system you designed recently.
+2. How have you balanced fast delivery with long-term code health?
+
+### Ownership
+1. Describe a time you owned an outage end-to-end. What did you learn?
+2. Tell me about a project where you made a call without having full consensus.
+
+### Make Room at the Table
+1. How have you ensured every voice is heard during design reviews?
+2. Give an example of mentoring someone from a different background.
+
+### 1% Better
+1. What habit or metric do you track to improve your engineering craft?
+2. Share a feature you iterated on multiple times—what drove each revision?
+
+---
+## Tips for Success
+• **Research** recent DoorDash engineering blogs & products to tailor your stories.  
+• **Bring artifacts** (diagrams, metrics screenshots) if virtual; they anchor your narrative.  
+• **Listen actively**—clarify questions before answering.  
+• **Time-box**: Aim for 2–3 min per answer; let interviewer dig deeper.  
+• **Reflect**: End answers with what you’d do differently next time.
+
+---
+## Rapid-Fire Self-Assessment
+Check these boxes before the call:
+- [ ] I can explain DoorDash’s mission in **<30 sec**.
+- [ ] I know my top 3 impact metrics by heart.
+- [ ] I have failure stories prepared (blameless, growth-oriented).
+- [ ] I can articulate my personal development plan for the next 12 months.
+
+---
+## Closing
+The Engineering Values round is less about *what* you built and more about *how* you built it and *why* it mattered. Authenticity, clarity, and data-driven impact are your best allies. Good luck!

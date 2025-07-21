@@ -1,0 +1,969 @@
+# Flight Booking System: Component Design
+
+This document provides detailed designs for each core microservice in the flight booking system.
+
+## 1. User Service
+
+### 1.1 Responsibilities
+
+- User registration and authentication
+- Profile management
+- Preference tracking
+- Travel history and saved trips
+- User permissions and roles
+
+### 1.2 Data Model
+
+```
+User {
+  user_id: UUID (PK)
+  email: String (unique)
+  phone_number: String
+  password_hash: String
+  first_name: String
+  last_name: String
+  date_of_birth: Date
+  nationality: String
+  passport_number: String (encrypted)
+  passport_expiry: Date
+  created_at: Timestamp
+  last_login: Timestamp
+  account_status: Enum [ACTIVE, INACTIVE, SUSPENDED]
+  marketing_preferences: JSON
+  two_factor_enabled: Boolean
+}
+
+UserAddress {
+  address_id: UUID (PK)
+  user_id: UUID (FK)
+  address_type: Enum [HOME, WORK, BILLING]
+  address_line1: String
+  address_line2: String
+  city: String
+  state: String
+  postal_code: String
+  country: String
+  is_default: Boolean
+}
+
+UserPaymentMethod {
+  payment_method_id: UUID (PK)
+  user_id: UUID (FK)
+  payment_type: Enum [CREDIT_CARD, PAYPAL, etc.]
+  card_type: String
+  last_four: String
+  token: String (tokenized payment info)
+  is_default: Boolean
+  expiry_date: Date
+}
+
+FrequentFlyerProgram {
+  id: UUID (PK)
+  user_id: UUID (FK)
+  airline_code: String
+  program_name: String
+  membership_number: String (encrypted)
+  tier_status: String
+}
+
+TravelDocument {
+  document_id: UUID (PK)
+  user_id: UUID (FK)
+  document_type: Enum [PASSPORT, ID_CARD, VISA]
+  document_number: String (encrypted)
+  issuing_country: String
+  expiry_date: Date
+  document_holder_name: String
+}
+```
+
+### 1.3 APIs
+
+- `POST /users` - Create user
+- `GET /users/{id}` - Get user profile
+- `PUT /users/{id}` - Update user profile
+- `POST /auth/login` - User login
+- `POST /auth/logout` - User logout
+- `POST /auth/refresh-token` - Refresh auth token
+- `POST /auth/reset-password` - Password reset
+- `POST /users/{id}/payment-methods` - Add payment method
+- `GET /users/{id}/payment-methods` - Get payment methods
+- `POST /users/{id}/frequent-flyer-programs` - Add frequent flyer program
+- `GET /users/{id}/travel-documents` - Get travel documents
+- `POST /users/{id}/travel-documents` - Add travel document
+
+### 1.4 Event Publications
+
+- `UserCreated`
+- `UserUpdated`
+- `UserLoginDetected`
+- `SuspiciousActivityDetected`
+
+### 1.5 Event Subscriptions
+
+- `BookingCompleted`
+- `PaymentMethodAdded`
+
+### 1.6 Scaling Strategy
+
+- Horizontal scaling with stateless service instances
+- User data sharded by user_id
+- Caching of user profiles and preferences
+- Read replicas for user lookup operations
+
+## 2. Search Service
+
+### 2.1 Responsibilities
+
+- Process flight search requests
+- Query GDS and direct airline connections
+- Aggregate and normalize search results
+- Apply filtering and sorting
+- Cache popular search results
+- Implement fare rules and pricing
+
+### 2.2 Data Model
+
+```
+SearchRequest {
+  request_id: UUID (PK)
+  user_id: UUID (optional)
+  origin: String
+  destination: String
+  departure_date: Date
+  return_date: Date (optional)
+  adults: Integer
+  children: Integer
+  infants: Integer
+  cabin_class: Enum [ECONOMY, PREMIUM_ECONOMY, BUSINESS, FIRST]
+  flexible_dates: Boolean
+  direct_flights_only: Boolean
+  preferred_airlines: Array<String>
+  timestamp: Timestamp
+  client_ip: String
+  device_info: String
+}
+
+SearchResult {
+  result_id: UUID (PK)
+  request_id: UUID (FK)
+  result_hash: String
+  results: JSON
+  provider: String
+  timestamp: Timestamp
+  expiry: Timestamp
+  status: Enum [PENDING, COMPLETED, FAILED]
+}
+
+FlightOffer {
+  offer_id: UUID (PK)
+  result_id: UUID (FK)
+  provider_reference: String
+  validating_airline: String
+  total_price: Decimal
+  currency: String
+  fare_type: String
+  fare_basis: String
+  cabin_class: String
+  booking_class: String
+  available_seats: Integer
+  refundable: Boolean
+  expiration_time: Timestamp
+  segments: JSON
+  baggage_allowance: JSON
+  fare_rules: JSON
+}
+
+CachedRoute {
+  route_id: String (PK) (origin-destination-date)
+  search_count: Integer
+  last_updated: Timestamp
+  expiry: Timestamp
+  popular_airlines: Array<String>
+  avg_price: Decimal
+  min_price: Decimal
+}
+```
+
+### 2.3 APIs
+
+- `POST /search` - Initiate flight search
+- `GET /search/{request_id}` - Get search results
+- `GET /search/{request_id}/offers/{offer_id}` - Get specific flight offer
+- `POST /search/price-alert` - Set price alert
+- `GET /routes/popular` - Get popular routes
+- `GET /routes/{origin}/{destination}/stats` - Get route statistics
+
+### 2.4 Caching Strategy
+
+- Cache search results with TTL based on departure date proximity
+- Cache flight availability by route and date
+- Cache airline fare rules and policies
+- Implement stale-while-revalidate pattern for popular routes
+
+### 2.5 Search Optimization
+
+- Parallel queries to multiple providers
+- Early termination for slow providers
+- Prioritize cached results for instant response
+- Background refresh of near-expiry cache entries
+- Geographically distributed search nodes
+
+### 2.6 Scaling Strategy
+
+- Horizontal scaling based on search volume
+- Search request queuing during peak loads
+- Dedicated nodes for popular routes
+- Cache warming before known high-traffic periods
+
+## 3. Booking Service
+
+### 3.1 Responsibilities
+
+- Process booking requests
+- Verify flight availability
+- Manage passenger information
+- Coordinate with airline systems
+- Handle booking modifications and cancellations
+- Manage booking lifecycle
+
+### 3.2 Data Model
+
+```
+Booking {
+  booking_id: UUID (PK)
+  user_id: UUID (FK)
+  pnr: String (Passenger Name Record)
+  booking_status: Enum [PENDING, CONFIRMED, TICKETED, CANCELLED, MODIFIED]
+  total_amount: Decimal
+  currency: String
+  payment_status: Enum [PENDING, PAID, REFUNDED, PARTIALLY_REFUNDED]
+  booking_source: String
+  created_at: Timestamp
+  last_updated: Timestamp
+  contact_email: String
+  contact_phone: String
+  ip_address: String
+  cancellation_reason: String
+  agency_booking_id: String
+}
+
+BookingSegment {
+  segment_id: UUID (PK)
+  booking_id: UUID (FK)
+  flight_number: String
+  airline_code: String
+  origin: String
+  destination: String
+  departure_time: Timestamp
+  arrival_time: Timestamp
+  cabin_class: String
+  booking_class: String
+  status: Enum [CONFIRMED, CANCELLED, MODIFIED]
+  aircraft_type: String
+  fare_basis: String
+}
+
+Passenger {
+  passenger_id: UUID (PK)
+  booking_id: UUID (FK)
+  type: Enum [ADULT, CHILD, INFANT]
+  title: String
+  first_name: String
+  last_name: String
+  date_of_birth: Date
+  nationality: String
+  passport_number: String (encrypted)
+  passport_expiry: Date
+  passport_country: String
+  frequent_flyer_number: String
+  special_assistance: String
+  seat_preferences: String
+}
+
+Seat {
+  seat_id: UUID (PK)
+  booking_id: UUID (FK)
+  passenger_id: UUID (FK)
+  segment_id: UUID (FK)
+  seat_number: String
+  seat_type: String
+  price: Decimal
+  status: Enum [RESERVED, CONFIRMED, CHANGED]
+}
+
+AncillaryService {
+  service_id: UUID (PK)
+  booking_id: UUID (FK)
+  passenger_id: UUID (FK, optional)
+  segment_id: UUID (FK, optional)
+  service_type: Enum [BAGGAGE, MEAL, PRIORITY_BOARDING, LOUNGE, INSURANCE]
+  quantity: Integer
+  amount: Decimal
+  status: Enum [BOOKED, CONFIRMED, CANCELLED]
+  details: JSON
+}
+```
+
+### 3.3 APIs
+
+- `POST /bookings` - Create booking
+- `GET /bookings/{id}` - Get booking details
+- `PUT /bookings/{id}` - Update booking
+- `POST /bookings/{id}/cancel` - Cancel booking
+- `GET /bookings/{id}/receipt` - Get booking receipt
+- `POST /bookings/{id}/passengers` - Add passenger
+- `PUT /bookings/{id}/passengers/{passenger_id}` - Update passenger
+- `POST /bookings/{id}/ancillaries` - Add ancillary service
+- `POST /bookings/{id}/seats` - Select seats
+
+### 3.4 Event Publications
+
+- `BookingCreated`
+- `BookingConfirmed`
+- `BookingModified`
+- `BookingCancelled`
+- `BookingPaymentCompleted`
+
+### 3.5 Event Subscriptions
+
+- `PaymentProcessed`
+- `PaymentFailed`
+- `FlightScheduleChanged`
+
+### 3.6 Transaction Management
+
+- Saga pattern for booking flow
+- Compensating transactions for failures
+- Idempotent operations
+- Distributed locking for concurrent booking attempts
+
+### 3.7 Reliability Measures
+
+- Retry mechanism for airline integration
+- Circuit breakers for external dependencies
+- Booking status reconciliation
+- Asynchronous confirmation process
+
+## 4. Payment Service
+
+### 4.1 Responsibilities
+
+- Process payment transactions
+- Integrate with payment gateways
+- Handle payment authorization and capture
+- Process refunds and partial refunds
+- Implement fraud detection
+- Generate payment receipts
+
+### 4.2 Data Model
+
+```
+Payment {
+  payment_id: UUID (PK)
+  booking_id: UUID (FK)
+  user_id: UUID (FK)
+  amount: Decimal
+  currency: String
+  payment_method_id: UUID
+  payment_status: Enum [PENDING, AUTHORIZED, CAPTURED, FAILED, REFUNDED, PARTIALLY_REFUNDED]
+  gateway: String
+  gateway_transaction_id: String
+  authorization_code: String
+  error_code: String
+  error_message: String
+  created_at: Timestamp
+  updated_at: Timestamp
+  ip_address: String
+  fraud_score: Float
+}
+
+Refund {
+  refund_id: UUID (PK)
+  payment_id: UUID (FK)
+  amount: Decimal
+  currency: String
+  reason: String
+  status: Enum [PENDING, PROCESSED, FAILED]
+  gateway_refund_id: String
+  created_at: Timestamp
+  processed_at: Timestamp
+  processed_by: UUID
+}
+
+PaymentAttempt {
+  attempt_id: UUID (PK)
+  payment_id: UUID (FK)
+  status: Enum [PENDING, SUCCESS, FAILED]
+  gateway_response: JSON
+  created_at: Timestamp
+  ip_address: String
+  device_fingerprint: String
+}
+```
+
+### 4.3 APIs
+
+- `POST /payments` - Create payment
+- `GET /payments/{id}` - Get payment details
+- `POST /payments/{id}/capture` - Capture authorized payment
+- `POST /payments/{id}/refund` - Process refund
+- `GET /bookings/{id}/payments` - Get booking payments
+
+### 4.4 Payment Flow
+
+1. Payment authorization at booking time
+2. Capture on booking confirmation
+3. Refund processing for cancellations
+
+### 4.5 Security Measures
+
+- PCI DSS compliance
+- Tokenization of payment information
+- 3D Secure integration
+- Fraud detection algorithms
+- IP and device fingerprinting
+- Velocity checks
+
+### 4.6 Event Publications
+
+- `PaymentAuthorized`
+- `PaymentCaptured`
+- `PaymentFailed`
+- `RefundProcessed`
+
+### 4.7 Event Subscriptions
+
+- `BookingCreated`
+- `BookingConfirmed`
+- `BookingCancelled`
+
+## 5. Notification Service
+
+### 5.1 Responsibilities
+
+- Send transactional emails and SMS
+- Generate and deliver e-tickets
+- Send booking confirmations
+- Deliver flight status updates
+- Send check-in reminders
+- Manage notification preferences
+- Handle notification failures
+
+### 5.2 Data Model
+
+```
+Notification {
+  notification_id: UUID (PK)
+  user_id: UUID (FK)
+  type: Enum [BOOKING_CONFIRMATION, ITINERARY, CHECK_IN_REMINDER, FLIGHT_STATUS, PAYMENT_CONFIRMATION, REFUND_CONFIRMATION]
+  channel: Enum [EMAIL, SMS, PUSH, IN_APP]
+  status: Enum [QUEUED, SENT, DELIVERED, FAILED]
+  content_template: String
+  content_data: JSON
+  created_at: Timestamp
+  sent_at: Timestamp
+  error: String
+}
+
+NotificationPreference {
+  user_id: UUID (PK)
+  notification_type: String (PK)
+  email_enabled: Boolean
+  sms_enabled: Boolean
+  push_enabled: Boolean
+  marketing_enabled: Boolean
+}
+
+Template {
+  template_id: UUID (PK)
+  template_type: String
+  template_name: String
+  subject: String
+  content: Text
+  variables: Array<String>
+  language: String
+  version: Integer
+  is_active: Boolean
+}
+
+NotificationAttempt {
+  attempt_id: UUID (PK)
+  notification_id: UUID (FK)
+  timestamp: Timestamp
+  status: Enum [SUCCESS, FAILED]
+  provider_response: String
+  error_code: String
+}
+```
+
+### 5.3 APIs
+
+- `POST /notifications` - Queue notification
+- `GET /notifications/{id}` - Get notification status
+- `GET /users/{id}/notifications` - Get user notifications
+- `PUT /users/{id}/notification-preferences` - Update preferences
+
+### 5.4 Notification Channels
+
+- Email service integration (SendGrid, Amazon SES)
+- SMS providers (Twilio, MessageBird)
+- Push notification services (Firebase, APNs)
+- In-app notification center
+
+### 5.5 Event Subscriptions
+
+- `BookingCreated`
+- `BookingConfirmed`
+- `BookingModified`
+- `BookingCancelled`
+- `PaymentProcessed`
+- `CheckInAvailable`
+- `FlightStatusChanged`
+- `BoardingPassGenerated`
+
+### 5.6 Reliability Measures
+
+- Retry mechanism for failed notifications
+- Priority queuing for time-sensitive notifications
+- Fallback channels for critical notifications
+- Rate limiting to prevent flooding
+
+## 6. Check-in Service
+
+### 6.1 Responsibilities
+
+- Handle online check-in process
+- Generate boarding passes
+- Assign seats during check-in
+- Integrate with airline check-in systems
+- Validate travel documents
+- Enforce check-in policies and timelines
+
+### 6.2 Data Model
+
+```
+CheckIn {
+  check_in_id: UUID (PK)
+  booking_id: UUID (FK)
+  status: Enum [PENDING, COMPLETED, FAILED]
+  check_in_time: Timestamp
+  source: Enum [WEB, MOBILE, KIOSK, API]
+  airline_reference: String
+}
+
+PassengerCheckIn {
+  id: UUID (PK)
+  check_in_id: UUID (FK)
+  passenger_id: UUID (FK)
+  segment_id: UUID (FK)
+  status: Enum [PENDING, COMPLETED, FAILED]
+  seat_number: String
+  boarding_group: String
+  boarding_sequence: String
+  checked_baggage_count: Integer
+}
+
+BoardingPass {
+  boarding_pass_id: UUID (PK)
+  passenger_check_in_id: UUID (FK)
+  format: Enum [PDF, MOBILE, PKPASS, AZTEC]
+  barcode_data: String
+  qr_code: String
+  document_url: String
+  created_at: Timestamp
+  gate: String
+  terminal: String
+}
+
+CheckInEligibility {
+  booking_id: UUID (PK)
+  segment_id: UUID (PK)
+  check_in_open: Timestamp
+  check_in_close: Timestamp
+  is_eligible: Boolean
+  ineligibility_reason: String
+  last_updated: Timestamp
+}
+```
+
+### 6.3 APIs
+
+- `POST /bookings/{id}/check-in` - Initiate check-in
+- `GET /bookings/{id}/check-in/eligibility` - Check eligibility
+- `GET /bookings/{id}/boarding-passes` - Get boarding passes
+- `POST /bookings/{id}/segments/{segment_id}/seats` - Select seat during check-in
+
+### 6.4 Check-in Flow
+
+1. Verify check-in eligibility
+2. Collect passenger information (if needed)
+3. Process seat selection
+4. Generate boarding passes
+5. Send confirmation and boarding passes
+
+### 6.5 Integration Points
+
+- Airline check-in systems
+- Airport kiosk systems
+- Mobile wallet integration (Apple Wallet, Google Pay)
+- Document verification services
+
+### 6.6 Event Publications
+
+- `CheckInInitiated`
+- `CheckInCompleted`
+- `BoardingPassGenerated`
+
+### 6.7 Event Subscriptions
+
+- `BookingConfirmed`
+- `FlightScheduleChanged`
+- `CheckInWindowOpened`
+
+## 7. Itinerary Management Service
+
+### 7.1 Responsibilities
+
+- Manage user itineraries
+- Track flight status updates
+- Handle schedule changes
+- Provide trip reminders and alerts
+- Support travel disruption management
+- Generate travel documents
+
+### 7.2 Data Model
+
+```
+Itinerary {
+  itinerary_id: UUID (PK)
+  user_id: UUID (FK)
+  title: String
+  start_date: Date
+  end_date: Date
+  status: Enum [UPCOMING, IN_PROGRESS, COMPLETED, CANCELLED]
+  is_shared: Boolean
+  share_code: String
+  created_at: Timestamp
+  updated_at: Timestamp
+}
+
+ItineraryItem {
+  item_id: UUID (PK)
+  itinerary_id: UUID (FK)
+  booking_id: UUID (FK, optional)
+  type: Enum [FLIGHT, HOTEL, CAR, ACTIVITY, NOTE]
+  start_datetime: Timestamp
+  end_datetime: Timestamp
+  location: String
+  details: JSON
+  status: Enum [CONFIRMED, PENDING, CANCELLED]
+  order_index: Integer
+}
+
+FlightStatus {
+  status_id: UUID (PK)
+  flight_number: String
+  scheduled_departure: Timestamp
+  actual_departure: Timestamp
+  estimated_departure: Timestamp
+  departure_terminal: String
+  departure_gate: String
+  scheduled_arrival: Timestamp
+  actual_arrival: Timestamp
+  estimated_arrival: Timestamp
+  arrival_terminal: String
+  arrival_gate: String
+  status: Enum [SCHEDULED, DELAYED, DEPARTED, EN_ROUTE, LANDED, CANCELLED, DIVERTED]
+  delay_minutes: Integer
+  last_updated: Timestamp
+}
+
+TravelAlert {
+  alert_id: UUID (PK)
+  itinerary_id: UUID (FK)
+  itinerary_item_id: UUID (FK, optional)
+  type: Enum [DELAY, CANCELLATION, GATE_CHANGE, TERMINAL_CHANGE, WEATHER, TRAVEL_ADVISORY]
+  severity: Enum [INFO, WARNING, CRITICAL]
+  message: String
+  created_at: Timestamp
+  acknowledged: Boolean
+}
+```
+
+### 7.3 APIs
+
+- `GET /users/{id}/itineraries` - Get user itineraries
+- `POST /itineraries` - Create itinerary
+- `GET /itineraries/{id}` - Get itinerary details
+- `POST /itineraries/{id}/items` - Add item to itinerary
+- `GET /flights/{flight_number}/status` - Get flight status
+- `GET /itineraries/{id}/alerts` - Get travel alerts
+
+### 7.4 Flight Status Tracking
+
+- Integration with flight status data providers
+- Real-time flight tracking
+- Proactive delay and cancellation alerts
+- Connection impact analysis
+
+### 7.5 Event Publications
+
+- `ItineraryCreated`
+- `ItineraryUpdated`
+- `TravelAlertGenerated`
+
+### 7.6 Event Subscriptions
+
+- `BookingConfirmed`
+- `BookingModified`
+- `BookingCancelled`
+- `FlightStatusChanged`
+- `CheckInCompleted`
+
+## 8. Analytics Service
+
+### 8.1 Responsibilities
+
+- Collect and process system events
+- Generate business intelligence
+- Track user behavior and conversion
+- Provide search analytics
+- Support personalization
+- Generate operational reports
+
+### 8.2 Data Model
+
+```
+UserEvent {
+  event_id: UUID (PK)
+  user_id: UUID
+  anonymous_id: String
+  session_id: String
+  event_type: String
+  event_details: JSON
+  page: String
+  referrer: String
+  timestamp: Timestamp
+  client_ip: String
+  user_agent: String
+}
+
+SearchAnalytics {
+  search_id: UUID (PK)
+  origin: String
+  destination: String
+  departure_date: Date
+  return_date: Date
+  adults: Integer
+  children: Integer
+  infants: Integer
+  cabin_class: String
+  result_count: Integer
+  min_price: Decimal
+  max_price: Decimal
+  conversion: Boolean
+  booking_id: UUID
+  session_id: String
+  user_id: UUID
+  timestamp: Timestamp
+}
+
+BookingAnalytics {
+  booking_id: UUID (PK)
+  user_id: UUID
+  is_logged_in: Boolean
+  origin: String
+  destination: String
+  booking_value: Decimal
+  passenger_count: Integer
+  flight_type: Enum [ONE_WAY, ROUND_TRIP, MULTI_CITY]
+  booking_completion_time: Integer
+  payment_method: String
+  device_type: String
+  booking_funnel_steps: JSON
+  abandonment_step: String
+  marketing_channel: String
+  promo_code: String
+}
+
+AggregateMetrics {
+  metric_id: UUID (PK)
+  metric_name: String
+  dimension: String
+  dimension_value: String
+  date: Date
+  value: Decimal
+  count: Integer
+}
+```
+
+### 8.3 Event Tracking
+
+- Page views and clicks
+- Search queries and filters
+- Booking funnel progression
+- Error encounters
+- Feature usage
+
+### 8.4 Analytics Processing
+
+- Real-time event streaming
+- Batch processing for complex analytics
+- Data warehousing for historical analysis
+- Machine learning pipelines for predictions
+
+### 8.5 Reporting Capabilities
+
+- Conversion funnel analysis
+- Popular route trends
+- Booking patterns
+- Revenue analytics
+- User engagement metrics
+- Performance monitoring
+
+### 8.6 Integration Points
+
+- Data visualization tools
+- Business intelligence platforms
+- Marketing automation systems
+- Customer relationship management systems
+
+## 9. Airline Integration Service
+
+### 9.1 Responsibilities
+
+- Connect with airline reservation systems
+- Implement industry standards (NDC, ONE Order)
+- Handle GDS integrations
+- Normalize data across different providers
+- Manage connection pools and credentials
+- Monitor integration health
+
+### 9.2 Data Model
+
+```
+AirlineProvider {
+  provider_id: UUID (PK)
+  provider_name: String
+  provider_type: Enum [DIRECT, GDS, AGGREGATOR]
+  connection_details: JSON (encrypted)
+  status: Enum [ACTIVE, INACTIVE, MAINTENANCE, FAILED]
+  health_check_interval: Integer
+  last_health_check: Timestamp
+  timeout_ms: Integer
+  retry_count: Integer
+}
+
+AirlineIntegrationLog {
+  log_id: UUID (PK)
+  provider_id: UUID (FK)
+  operation_type: String
+  request_payload: JSON
+  response_payload: JSON
+  status_code: Integer
+  error_message: String
+  request_timestamp: Timestamp
+  response_timestamp: Timestamp
+  duration_ms: Integer
+}
+
+ProviderMapping {
+  mapping_id: UUID (PK)
+  source_system: String
+  target_system: String
+  entity_type: String
+  source_code: String
+  target_code: String
+  mapping_rules: JSON
+}
+
+ProviderHealthStats {
+  provider_id: UUID (FK)
+  timestamp: Timestamp
+  availability_percentage: Float
+  average_response_time: Integer
+  error_count: Integer
+  timeout_count: Integer
+  success_count: Integer
+}
+```
+
+### 9.3 Integration Patterns
+
+- Direct API connections
+- SOAP web services
+- Message queues
+- File-based transfers
+- Webhooks
+
+### 9.4 Reliability Measures
+
+- Circuit breakers
+- Retry mechanisms
+- Fallback providers
+- Request throttling
+- Connection pooling
+- Health monitoring
+
+### 9.5 Data Transformation
+
+- Format conversion
+- Field mapping
+- Data enrichment
+- Validation rules
+- Error handling
+
+### 9.6 APIs
+
+- `GET /providers` - List available providers
+- `GET /providers/{id}/health` - Check provider health
+- `POST /providers/{id}/test-connection` - Test connection
+- `GET /providers/{id}/capabilities` - Get provider capabilities
+
+## 10. Data Processing Pipeline
+
+### 10.1 Responsibilities
+
+- Process flight schedule updates
+- Handle fare and inventory updates
+- Process booking status changes
+- Generate alerts and notifications
+- Feed analytics and reporting systems
+
+### 10.2 Data Flow
+
+1. **Data Ingestion**:
+   - Airline schedule feeds
+   - Fare updates
+   - Inventory changes
+   - Booking status changes
+   - Flight status updates
+
+2. **Data Processing**:
+   - Normalization and validation
+   - Enrichment with reference data
+   - Transformation to system format
+   - Business rule application
+   - Anomaly detection
+
+3. **Data Distribution**:
+   - Updates to search cache
+   - Notifications to affected bookings
+   - Analytics event generation
+   - Audit trail recording
+
+### 10.3 Technologies
+
+- Apache Kafka for event streaming
+- Apache Spark for batch processing
+- Redis for real-time processing
+- Elasticsearch for search indexing
+- Amazon S3 for data lake storage
+
+### 10.4 Processing Patterns
+
+- Stream processing for real-time updates
+- Batch processing for non-time-critical operations
+- Micro-batch processing for near-real-time requirements
+- Lambda architecture for comprehensive processing

@@ -38,8 +38,8 @@ public class NextGreaterElement {
     public static void main(String[] args) {
         var sol = new NextGreaterElement();
         var res = sol.nextLargerElement(List.of(4, 5, 2, 25));
-        res = sol.nextLargerElement(List.of(13, 7, 6, 12));
-        res = sol.nextLargerElement(List.of(1, 2, 3, 4, 5));
+        // res = sol.nextLargerElement(List.of(13, 7, 6, 12));
+        // res = sol.nextLargerElement(List.of(1, 2, 3, 4, 5));
         System.out.println(res);
     }
 }

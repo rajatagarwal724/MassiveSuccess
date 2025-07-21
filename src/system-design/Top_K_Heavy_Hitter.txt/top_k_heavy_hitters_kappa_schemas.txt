@@ -1,0 +1,373 @@
+# Top K Heavy Hitters System - Kappa Architecture: Event and Database Schemas
+
+**Version:** 1.0
+**Last Updated:** 2025-06-01
+
+## 1. Event Schemas
+
+In a Kappa Architecture, the event stream serves as the single source of truth. Well-defined event schemas are critical for ensuring data consistency, evolution capabilities, and efficient processing.
+
+### 1.1. Raw Event Schema
+
+#### 1.1.1. Generic Event Envelope (Kafka Record)
+
+```json
+{
+  "metadata": {
+    "eventId": "uuid-string",              // Unique identifier for the event
+    "eventType": "string",                // Type of event (e.g., "page_view", "purchase")
+    "source": "string",                   // Source system that generated the event
+    "timestamp": "ISO-8601 datetime",     // When the event occurred
+    "partitionKey": "string",            // Used for consistent Kafka partitioning
+    "schemaVersion": "integer"           // Version of the event schema
+  },
+  "payload": {                           // Event-specific data
+    // Varies by eventType - see specific schemas below
+  }
+}
+```
+
+#### 1.1.2. Page View Event
+
+```json
+{
+  "metadata": {
+    "eventId": "550e8400-e29b-41d4-a716-446655440000",
+    "eventType": "page_view",
+    "source": "web_application",
+    "timestamp": "2025-06-01T05:30:45.123Z",
+    "partitionKey": "user_123",
+    "schemaVersion": 1
+  },
+  "payload": {
+    "userId": "string",                    // User identifier (may be anonymous)
+    "sessionId": "string",                 // Browser/app session
+    "url": "string",                       // Full URL of the page
+    "referrer": "string",                  // Referrer URL
+    "userAgent": "string",                 // Browser/client information
+    "deviceType": "string",                // mobile, tablet, desktop, etc.
+    "ipAddress": "string",                 // Client IP address
+    "pageId": "string",                    // Unique identifier for the page
+    "pageCategory": "string",              // Category of the page
+    "loadTimeMs": "integer"                // Page load time in milliseconds
+  }
+}
+```
+
+#### 1.1.3. Product View Event
+
+```json
+{
+  "metadata": {
+    "eventId": "550e8400-e29b-41d4-a716-446655440001",
+    "eventType": "product_view",
+    "source": "mobile_application",
+    "timestamp": "2025-06-01T05:31:15.789Z",
+    "partitionKey": "product_456",
+    "schemaVersion": 1
+  },
+  "payload": {
+    "userId": "string",                    // User identifier
+    "sessionId": "string",                 // Session identifier
+    "productId": "string",                 // Unique identifier for the product
+    "productSku": "string",                // Stock keeping unit
+    "productCategory": "string",           // Product category
+    "productSubcategory": "string",        // Product subcategory
+    "productPrice": "decimal",             // Product price
+    "productBrand": "string",              // Product brand
+    "viewDurationMs": "integer",           // How long the product was viewed
+    "referrerPage": "string"               // Page that led to this product view
+  }
+}
+```
+
+#### 1.1.4. API Request Event
+
+```json
+{
+  "metadata": {
+    "eventId": "550e8400-e29b-41d4-a716-446655440002",
+    "eventType": "api_request",
+    "source": "api_gateway",
+    "timestamp": "2025-06-01T05:32:10.456Z",
+    "partitionKey": "endpoint_789",
+    "schemaVersion": 1
+  },
+  "payload": {
+    "requestId": "string",                 // Unique request identifier
+    "clientId": "string",                  // API client identifier
+    "endpoint": "string",                  // API endpoint path
+    "method": "string",                    // HTTP method
+    "statusCode": "integer",               // HTTP response code
+    "latencyMs": "integer",                // Request-to-response time
+    "userIp": "string",                    // Client IP address
+    "userAgent": "string",                 // User agent string
+    "region": "string",                    // Geographic region
+    "bytesTransferred": "integer"          // Bytes transferred in the request/response
+  }
+}
+```
+
+### 1.2. Processed Event Schema
+
+After initial processing, events are transformed into a standardized format for the heavy hitter detection algorithm. This normalization makes frequency counting more efficient.
+
+#### 1.2.1. Normalized Item Event
+
+```json
+{
+  "itemKey": "string",                   // The item whose frequency is being tracked
+  "itemType": "string",                  // Category of the item (url, product, api, etc.)
+  "dimensions": {                        // Multi-dimensional attributes for grouped analysis
+    "dimension1": "value1",
+    "dimension2": "value2",
+    // Additional dimensions as needed
+  },
+  "weight": "integer",                   // Optional weight for the item (default: 1)
+  "timestamp": "ISO-8601 datetime",      // When the event occurred
+  "windowKey": "string"                  // Identifier for the time window (e.g., "hour_2025060105")
+}
+```
+
+### 1.3. Schema Evolution Strategy
+
+1. **Version Field:** All schemas include a version field to track evolution
+2. **Backward Compatibility:** New fields should be optional with defaults
+3. **Forward Compatibility:** Processors should ignore unknown fields
+4. **Schema Registry:** Use Confluent Schema Registry or similar to manage schemas
+5. **Migration Path:** Clear documentation for migrating between versions
+
+## 2. Database Schemas
+
+The database schemas support the state storage, result storage, and metadata management requirements of the system.
+
+### 2.1. State Store Schema
+
+#### 2.1.1. Sketch State (Internal Flink/RocksDB)
+
+Flink's state backend (RocksDB) stores the following data structures for sketch algorithms:
+
+```
+// Key-value pairs in RocksDB
+
+// Count-Min Sketch Matrix
+KEY: "sketch:{window}:{dimension}"
+VALUE: byte[] // Serialized Count-Min Sketch (2D array of counters)
+
+// Space-Saving Algorithm State
+KEY: "space-saving:{window}:{dimension}"
+VALUE: byte[] // Serialized Space-Saving state (stream-summary data structure)
+
+// Metadata
+KEY: "meta:{window}:{dimension}"
+VALUE: {
+  "totalItems": long,          // Total number of items processed
+  "uniqueItems": long,         // Estimated number of unique items
+  "lastUpdated": timestamp,    // Last update time
+  "sketchParams": {            // Parameters of the sketch
+    "width": int,              // Width of Count-Min Sketch
+    "depth": int,              // Depth of Count-Min Sketch
+    "counterSize": int,        // Bits per counter
+    "topK": int                // Number of items tracked in Space-Saving
+  }
+}
+```
+
+#### 2.1.2. Checkpoint Metadata (HDFS/S3)
+
+```
+// Directory structure for checkpoint storage
+/checkpoints/
+  /{jobId}/
+    /{checkpointId}/
+      /metadata           // Checkpoint metadata file
+      /state/            // Directory containing state files
+        /{taskId}-{subtaskIndex}  // State for each task/subtask
+```
+
+### 2.2. Result Store Schema (Redis)
+
+Results are stored in Redis for fast access by the Query Service:
+
+#### 2.2.1. Top K Lists (Sorted Sets)
+
+```
+// Sorted Set for each window and dimension combination
+KEY: "topk:{window}:{dimension}"
+VALUE: Sorted Set where:
+  - Members are item keys
+  - Scores are estimated counts
+
+// Examples:
+"topk:hour_2025060110:url"       // Top URLs in the 10:00-11:00 hour
+"topk:day_20250601:productId"    // Top products for June 1, 2025
+"topk:global:apiEndpoint"        // All-time top API endpoints
+```
+
+#### 2.2.2. Item Details (Hashes)
+
+```
+// Hash storing details for each heavy hitter item
+KEY: "item:{itemType}:{itemKey}"
+VALUE: Hash with fields:
+  "itemKey": string          // The item identifier
+  "itemType": string         // Category of the item
+  "totalCount": integer      // Global count across all time
+  "firstSeen": timestamp     // First time item was observed
+  "lastSeen": timestamp      // Most recent time item was observed
+  "metadata": string         // JSON string with additional item metadata
+```
+
+#### 2.2.3. Metadata (Hashes)
+
+```
+KEY: "meta:{window}:{dimension}"
+VALUE: Hash with fields:
+  "totalEvents": string        // Total events processed
+  "uniqueItems": string        // Estimated unique items
+  "lastUpdated": string        // ISO timestamp of last update
+  "windowStart": string        // ISO timestamp of window start
+  "windowEnd": string          // ISO timestamp of window end
+  "errorBound": string         // Estimated error bound percentage
+  "k": string                  // Number of items in top K
+```
+
+### 2.3. History Store Schema (Cassandra/TimescaleDB)
+
+For historical analysis, heavy hitter results are persisted in a time-series optimized database:
+
+#### 2.3.1. Heavy Hitters Table
+
+```sql
+CREATE TABLE heavy_hitters (
+  window_key TEXT,              -- Time window identifier (e.g., "hour_2025060110")
+  dimension TEXT,               -- Dimension for this heavy hitters list
+  item_key TEXT,                -- Item identifier
+  item_type TEXT,               -- Category of the item
+  rank INT,                     -- Position in the top K (1 to K)
+  estimated_count BIGINT,       -- Estimated frequency count
+  error_bound_percent DOUBLE,   -- Error bound as percentage
+  PRIMARY KEY ((window_key, dimension), rank)
+);
+```
+
+#### 2.3.2. Window Metadata Table
+
+```sql
+CREATE TABLE window_metadata (
+  window_key TEXT,              -- Time window identifier
+  dimension TEXT,               -- Dimension for this window
+  window_start TIMESTAMP,       -- Start time of the window
+  window_end TIMESTAMP,         -- End time of the window
+  total_events BIGINT,          -- Total events in this window
+  unique_items_estimate BIGINT, -- Estimated number of unique items
+  processing_complete BOOLEAN,  -- Flag indicating if window is complete
+  last_updated TIMESTAMP,       -- When this window was last updated
+  PRIMARY KEY (window_key, dimension)
+);
+```
+
+### 2.4. Configuration Store (ZooKeeper/Consul)
+
+Stores dynamic configuration for the processing pipeline:
+
+```
+/config/
+  /sketch/
+    /width: 1024               // Width of Count-Min Sketch
+    /depth: 5                  // Depth of Count-Min Sketch
+    /counterSize: 32           // Bits per counter
+  /processing/
+    /topK: 100                 // Default K value
+    /windowSizes: ["1m", "1h", "1d", "all"]  // Supported window sizes
+    /dimensions: ["url", "productId", "userAgent", "apiEndpoint"]  // Supported dimensions
+  /scaling/
+    /parallelism: 16           // Processing parallelism
+    /targetThroughput: 1000000 // Events per second target
+```
+
+## 3. Schema Mapping and Transformations
+
+### 3.1. Event to Item Mapping
+
+This table shows how raw events are mapped to trackable items for heavy hitter detection:
+
+| Event Type   | Item Key                  | Item Type    | Dimensions                     |
+|--------------|---------------------------|-------------|--------------------------------|
+| page_view    | url                       | url         | deviceType, pageCategory       |
+| product_view | productId                 | product     | productCategory, productBrand  |
+| api_request  | endpoint                  | api         | method, statusCode, region     |
+| search       | searchQuery               | search      | category, resultCount          |
+| purchase     | productId                 | purchase    | productCategory, customerType  |
+
+### 3.2. Windowing Strategy
+
+The system supports multiple time windows for analysis:
+
+| Window Type | Duration     | Window Key Format         | Purpose                             |
+|-------------|--------------|---------------------------|-------------------------------------|
+| Minute      | 1 minute     | minute_YYYYMMDDHHMM       | Real-time trend detection           |
+| Hour        | 1 hour       | hour_YYYYMMDDHH           | Short-term trend analysis           |
+| Day         | 24 hours     | day_YYYYMMDD              | Daily patterns and reporting        |
+| Week        | 7 days       | week_YYYYWW               | Weekly trend analysis               |
+| Month       | Calendar month| month_YYYYMM              | Monthly reporting and comparison   |
+| Global      | All time     | global                    | All-time heavy hitters              |
+
+## 4. Schema Versioning and Evolution
+
+### 4.1. Event Schema Evolution
+
+1. **Versioning Strategy:**
+   - Semantic versioning (MAJOR.MINOR.PATCH)
+   - Major version for backward-incompatible changes
+   - Minor version for backward-compatible additions
+
+2. **Compatibility Rules:**
+   - Never remove fields from existing schemas
+   - Never change field types in incompatible ways
+   - Always provide default values for new fields
+   - Use optional fields whenever possible
+
+3. **Evolution Process:**
+   - Register new schema version in Schema Registry
+   - Deploy consumers that can handle both old and new versions
+   - Deploy producers with new schema version
+   - Monitor adoption and errors
+
+### 4.2. Database Schema Evolution
+
+1. **State Store Evolution:**
+   - Version embedded in key names (e.g., "sketch:v2:{window}")
+   - Migration jobs to transform data between versions
+   - Dual-write during transitions
+
+2. **Result Store Evolution:**
+   - Backward compatible additions only
+   - New features in separate keys/data structures
+
+3. **History Store Evolution:**
+   - Standard database migration patterns
+   - View-based compatibility layers for breaking changes
+
+## 5. Schema Security Considerations
+
+### 5.1. Data Protection
+
+1. **Sensitive Data Handling:**
+   - PII identification and masking in event schemas
+   - Encryption for sensitive fields
+   - Retention policies aligned with data governance
+
+2. **Access Control:**
+   - Field-level permissions for query results
+   - Row-level security for multi-tenant implementations
+
+### 5.2. Compliance Requirements
+
+1. **Audit Trail:**
+   - Schema changes logged with timestamp and author
+   - Processing parameters recorded for reproducibility
+
+2. **Data Lineage:**
+   - Tracking of data transformations between schemas
+   - Source identification in all derived datasets

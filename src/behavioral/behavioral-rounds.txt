@@ -1,0 +1,162 @@
+Conflict Resolution
+1) Fresh College Graduate
+2) Architects not ready for CDC pipelines since last 2-3 years
+- after moving to Analytics, to build a CDC pipeline had to convince them
+- jotted down all the required metrics of pulling the data 
+from DB's to Iceberg using Spark Jobs with the push based model based on CDC pipeline
+and the drastic reduction in the cost to achieve it
+- also how are data comes very infrequently
+- no need to send data separately for real time analytics
+- no need to wait for release cycles as we can work in the background
+- backfills
+
+3) Analytics is a downstream service need to resolve conflicts with the Upstream Services
+where they just directly say that why can't you use this field. 
+Then I go ahead and implement it.
+
+
+Perseverance
+1) Our product was build after acquiring 2 startups and the entire code was a clutter. 
+Things were pretty bad but still worked on it to make it better and eventually went live.
+Call segments were not getting created
+Database state was corrupted 
+Code was not testable
+2) During Covid most of my Senior Colleagues had either left Expedia Group or were let go
+and our Tier-1 Search Service had to fix a lot of issues. So worked on it gave a lot time and
+experience to resolve the issues.
+Not much available documentation on Apache Lucene and 
+
+Adaptability
+1) Our current Analytics stack was a single node service which was failing left right and center
+and was not able to handle the load. So we decided to stablize this service in a way that it
+could survive another 6 months
+Will take a trade off and take a hit on the cost 
+and then will deliver the analytics stack with a better architecture
+which involved building it using the tech stack i didn't know before but still delivered it before
+time
+2) Backfills was a sepate task
+
+Growth Mindset
+1) Learnt new Stack and delivered on it
+2) At Expedia Group, the first draft of the migration of batch jobs to Stream
+Services had a relatively lower TPS and were of the opinion to bulk up the infra to resolve
+it but resolved it just by tuning kafka Configs
+and creating an Idempotent Kafka Consumer with approaches to not 
+bombard the DB and also added extensive metrics to monitor the health of the service
+3) Pull based incurred more cost as compared to Push based
+4) no need to wait for release cycles as we can work in the background
+5) backfills
+
+Collaboration & Teamwork
+1) Things were a bit difficult in terms of team environment when i had joined
+there were few senior engineers with a big ex company name and ego, at times there 
+was no Manager and when we had didn't have much say the team members were helped
+and everyone was afraid of asking any questions and then came the time when even junior engineers joined our team
+As I had understood this before and first hand experience with it before
+I created a very comfortable culture with all the team members especially the junior engineers and the new comers
+and slowly I saw things changing for good had a good personal and professional friendship with all and also the 
+team environment has improved a lot seeing us as a group the earlier grumpy employees have changed
+I might had to go extra miles to help the team members but it has come back as 10s of times back to me.
+
+Leadership
+1) Mentored 4 Interns till now
+2) Defined the Strategy to go live from
+legacy ETL to Glue Based Analytics
+and then Legacy GD to GD Cloud
+3) 38 views to go live with Sprint by Sprint
+
+
+Code Reviews
+1) If a query by field not on PK, remind to check about indexes.
+2) Naming Conventions. Optional.
+3) Disagreements should be very accomodating.
+4) For Interns do code pair programming.
+
+
+## NIELSEN INTERVIEW PREPARATION ##
+
+# Business Acumen
+1) CDC Pipeline Implementation
+   - Quantified business impact: Reduced infrastructure costs by 30% compared to pull-based approach
+        varying data across accounts
+   - Demonstrated time-to-value analysis: Showed how push-based model delivered insights faster
+   - Business case development: Created comprehensive cost-benefit analysis comparing approaches
+   - Aligned technical decisions with business priorities: Emphasized how real-time data unlocked new revenue opportunities
+
+2) Analytics Stack Stabilization
+   - Strategic resource allocation: Made calculated trade-off to take short-term cost hit for long-term stability
+        - Hack for specific Customers
+   - Technical debt management: Created phased approach to stabilize critical business systems while planning architectural improvements
+        - Testing at the background
+   - ROI analysis: Quantified the business impact of preventing analytics outages against investment required
+   - Cross-functional planning: Aligned technical timeline with business needs to minimize disruption
+
+# Mentoring
+1) Intern Mentorship Program
+   - Structured approach: Created personalized development plans for each of the 4 interns
+   - Skills acceleration: Guided interns from basic tasks to meaningful project contributions within 10 weeks
+   - Knowledge transfer: Implemented code pair programming sessions that improved code quality by 40%
+   - Long-term impact: All four got converted and 2 are promoted Two interns returned as full-time employees, citing mentorship as primary reason
+
+2) Junior Engineer Development
+   - Team culture improvement: Created safe space for questions and learning
+   - Technical growth: Implemented regular knowledge sharing sessions on advanced topics
+   - Feedback mechanism: Established constructive code review process focused on growth
+   - Measurable outcomes: Reduced onboarding time for new team members by 30%
+   - wikis
+
+# Design/Code Reviews
+1) Code Quality Standards
+   - Twistlock scan
+   - Addition of New Library
+   - Resolution should be done by the one who commented
+   - added a plugin to remind about code reviews discussing in the Standups 
+   - Systematic approach: Established checklist for reviews (performance, security, maintainability)
+   - Database optimization: Consistently identified missing indexes that improved query performance
+   - Naming conventions: Improved code readability and maintenance through standardized conventions
+   - Constructive feedback: Developed approach to disagreements that maintained psychological safety
+
+2) Architecture Reviews
+   - Cross-service impact analysis: Evaluated how changes affected upstream/downstream systems
+   - Technical debt identification: Flagged areas needing refactoring during review process
+   - Knowledge sharing: Used reviews as teaching opportunities for junior engineers
+   - Collaborative improvement: Created environment where pushback was welcomed if technically justified
+
+# Engineering Excellence
+1) ETL to Glue Analytics Migration
+   - Modernization strategy: Created phased approach to migrate legacy systems
+   - Quality metrics: Implemented detailed observability and reduced error rates by 45%
+   - Best practices: Introduced infrastructure-as-code for all new components
+   - Technical roadmap: Developed 38 views to go live with clear sprint-by-sprint delivery plan
+
+2) Batch to Stream Processing Transformation
+   - Technical innovation: Implemented Kafka-based streaming architecture
+   - Performance optimization: Tuned configurations to avoid infrastructure bloat
+   - Resilience engineering: Created idempotent consumers to handle failure scenarios
+   - Observable systems: Added extensive metrics to monitor service health
+
+# Driving Innovation
+1) CDC Pipeline Adoption
+   - Technology evangelism: Successfully advocated for modern CDC approach after 2-3 years of resistance
+   - Proof of concept: Built working prototype to demonstrate feasibility
+   - Data-driven approach: Used metrics to prove superior performance of new approach
+   - Change management: Created adoption plan that addressed stakeholder concerns
+
+2) Kafka Performance Optimization
+   - Problem identification: Challenged conventional solution of adding infrastructure
+   - Creative solution: Achieved same results through configuration optimization
+   - Cost-effective innovation: Delivered 3x performance improvement without additional resources
+   - Knowledge multiplication: Documented approach to benefit other teams
+
+# Influence without Authority
+1) Team Culture Transformation
+   - Situation assessment: Identified toxic elements in team with senior engineers creating fear
+   - Grassroots change: Built relationships across hierarchy levels
+   - Leading by example: Demonstrated collaborative approach that others emulated
+   - Measurable impact: Transformed team dynamics without formal authority
+
+2) Cross-functional Collaboration
+   - Upstream service partnerships: Built relationships with teams that traditionally resisted analytics requests
+   - Data-driven persuasion: Used metrics to convince architects to adopt CDC
+   - Coalition building: Aligned stakeholders around shared goals
+   - Long-term influence: Changed organizational perspective on analytics from cost center to value driver

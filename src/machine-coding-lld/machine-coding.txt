@@ -1,0 +1,90 @@
+# 3-Day Java Machine-Coding Prep Plan (MTS-3 / MTS-4)
+
+> Goal: cover the **8–10 patterns** that dominate Indian product-company machine-coding rounds (MakeMyTrip, Razorpay, CRED, Swiggy, PhonePe, etc.).  Each day mixes **hands-on coding**, **design write-ups**, and **mock review** so that by Day-3 you can implement any variant confidently.
+
+---
+## Day-0 (Tonight) – Environment & Warm-up *(1-2 h)*
+1. **Repo hygiene**: Clone this repo locally & ensure IntelliJ shortcut templates:
+   ```java
+   psvm, sout, log.*, ts = test stub
+   ```
+2. **Reference skeletons in this workspace**  
+   • `lld/KeyValue/InMemoryKeyValueWithTransaction.txt` – optimistic concurrency  
+   • `lld/task-management/task-management.txt` – domain driven LLD  
+   • `machine-coding-lld/Task_Management.txt` – full walkthrough  
+3. Skim the common rubric (5 min each): readability, O (1) APIs, thread-safety, SOLID.
+
+---
+## Day-1 – Core CRUD & OOP Patterns *(~6 h)*
+
+| Slot | Topic | Problem | Deliverable |
+|------|-------|---------|-------------|
+| 9-11 am | **Parking-Lot** | Classic: find nearest slot, handle multiple lots, pricing | Write POJOs + `ParkingService`; unit tests for allocate / deallocate |
+| 11-12 pm | Review & Refactor | Apply SRP, Enum strategy for VehicleType | 15-min retro notes |
+| 1-3 pm | **Split-Wise** (Expense Sharing) | O(1) balance lookup, settle-up graph | Code skeleton + `BalanceSheet` logic |
+| 3-4 pm | **Template** creation | Extract BaseService, Exception hierarchy | Abstract template committed |
+| 4-6 pm | **Snake-&-Ladder / Tic-Tac-Toe** | Focus: immutable board vs. mutability trade-offs | End-to-end CLI; emphasise testing |
+| nightly | **Reflection** | Re-read solutions & self-review with rubric sheet |  
+
+High-level solutions are available in:
+* `machine-coding-lld/parking-lot.txt`
+* `machine-coding-lld/splitwise.txt`
+* `machine-coding-lld/board-games.txt`
+(If absent, create stubs – follow the patterns used in KeyValue store.)
+
+---
+## Day-2 – Concurrency & Real-time Systems *(~7 h)*
+
+| Slot | Topic | Problem | Focus |
+|------|-------|---------|-------|
+| 9-10 am | **Java Concurrency Primer** | Locks vs. `ConcurrentHashMap`, CAS, `BlockingQueue` | Demo snippets |
+| 10-1 pm | **Rate Limiter** (Token / Leaky Bucket) | QPS enforcement, sliding window | Thread-safe design + tests |
+| 2-4 pm | **Multi-tenant Fair Queue** (already in repo) | Ensure round-robin fairness | Add metrics hooks |
+| 4-6 pm | **Task Scheduler / Cron** | Hierarchical timing-wheel (see memory 55c9…) | Implement `SchedulerService` prototype |
+| 8-9 pm | **Code-Review Session** | Use a buddy / ChatGPT to critique | Capture TODO list |
+
+Reference implementations:
+* `machine-coding-lld/multi-tenant-queue.txt`
+* `src/main/java/lld/distributedKV/MVCCKeyValueStore.java` (MVCC tricks)
+
+---
+## Day-3 – High Scalability & Mock Interview *(~6 h + 1 h mock)*
+
+| Slot | Topic | Problem | Stretch Goals |
+|------|-------|---------|---------------|
+| 9-11 am | **In-Memory KV Store** (done) | Add TTL & persistence stub | Write README explaining MVCC vs. OptimisticLock |
+| 11-1 pm | **URL Shortener** (TinyURL) | Consistent hashing, base62 | Implement DB layer w/ LRU cache |
+| 2-3 pm | **Notifications / Pub-Sub** | Observer pattern, fanout queues | Integrate with Task-Mgmt system |
+| 3-4 pm | **System Hooks** | Health-check, logging, `Slf4j` | Add to two existing codebases |
+| 4-5 pm | **Mock Interview** | Pick any random prompt, 30-min solve + 15-min defend | Record & review |
+| evening | **Revision & Cheat-sheet** | Summarise patterns, memorise command snippets | One-page PDF |
+
+---
+## Quick Solution Templates
+
+```java
+// Command interface
+public interface Command {
+    void execute();
+}
+
+// Service locator (for DI in interviews without Spring)
+class ServiceRegistry {
+    private static final Map<Class<?>, Object> beans = new HashMap<>();
+    public static <T> void register(Class<T> clazz, T obj) { beans.put(clazz, obj); }
+    public static <T> T get(Class<T> clazz) { return clazz.cast(beans.get(clazz)); }
+}
+```
+Use the above to keep main `Main.java` lean.
+
+---
+## Evaluation Checklist (Ask interviewer!)
+- [ ] O(1) critical APIs
+- [ ] Thread-safety narrative & data structures choice
+- [ ] Modularity: SRP, open/closed
+- [ ] Extensibility: new feature in <5 mins?
+- [ ] Tests or at least a `main()` demo
+- [ ] Logging & error handling
+- [ ] README / inline comments
+
+Good luck! Focus on **clarity over cleverness**, talk while coding, and always finish with a README summary.

@@ -1,0 +1,110 @@
+# Virtual Waiting Room with DynamoDB, AWS Lambda, and CDN Edge: SeatGeek & Industry Synthesis
+
+## 1. Introduction
+A virtual waiting room is essential for handling high-demand ticket sales, protecting backend systems from overload, and ensuring fairness. Leading platforms like SeatGeek use AWS DynamoDB, Lambda, and CDN edge (Fastly, CloudFront) to build scalable, resilient virtual waiting rooms.
+
+---
+
+## 2. High-Level Architecture
+
+- **User Traffic** is routed to CDN (e.g., Fastly, CloudFront) before reaching backend services.
+- **Protected Zone**: The actual ticket purchase page, shielded from direct access.
+- **Virtual Waiting Room**: Users are held here until allowed into the protected zone.
+- **API Gateway & Lambda**: Orchestrate queue logic, token management, and DynamoDB updates.
+- **DynamoDB**: Stores queue state, tokens, counters, and protected zone metadata.
+- **Leaky Bucket**: Controls the admission rate to the protected zone.
+- **DynamoDB Streams & Lambda**: Sync state to CDN edge, trigger notifications.
+
+---
+
+## 3. Workflow & Core Components
+
+### Step-by-Step Workflow
+1. **Pre-Sale**: All users routed to the virtual waiting room (CDN edge page).
+2. **Token Assignment**: On entry, each user receives a visitor token with a timestamp (arrival time).
+3. **WebSocket/API Call**: The client sends the visitor token to backend via API Gateway.
+4. **Lambda Processing**: Lambda validates and registers the token in DynamoDB, guaranteeing queue position (FIFO).
+5. **Leaky Bucket Control**: Periodic Lambda ("exchanger") checks bucket capacity and swaps visitor tokens for access tokens (if space available).
+6. **Admission & Notification**: DynamoDB Streams trigger another Lambda to notify users (via WebSocket) when they can enter the protected zone.
+7. **Purchase Flow**: User presents access token, is admitted to protected zone, and proceeds with ticket purchase.
+8. **CDN Caching**: Status codes (e.g., 429 for full bucket) are cached at the CDN to minimize backend load.
+
+### Modes of Operation
+- **Waiting Room Mode**: All users held until sale starts.
+- **Queueing Mode**: FIFO queue with controlled throughput to protected zone.
+- **Hybrid**: Waiting room transitions to queueing at sale start.
+
+---
+
+## 4. DynamoDB Design & Scaling
+
+### Key Tables
+- **Protected Zone Table**: Metadata for each event's protected zone.
+- **Counters Table**: Tracks issued access tokens per protected zone per minute.
+- **User Connection Table**: Maps visitor tokens to connection IDs (for notifications).
+- **Queue Table**: Maps visitor tokens to access tokens and queue positions.
+
+### Sharding for Scale
+- DynamoDB partitions have throughput limits (e.g., 3,000 reads/1,000 writes per partition).
+- **Sharding**: Partition key is appended with a shard number (e.g., eventId#shard1), distributing load across N shards.
+- Queries and scans must aggregate across all shards (parallelized for efficiency).
+
+### Garbage Collection
+- Queue data is ephemeral: after the sale, data is deleted (DynamoDB TTL or batch deletion), keeping costs low.
+
+---
+
+## 5. Leaky Bucket Implementation
+- Each protected zone has a leaky bucket (capacity = concurrent allowed users).
+- If the bucket is full, new requests are queued; otherwise, an access token is issued instantly.
+- Lambda functions manage bucket state and admission rate.
+- CDN caches 429/full responses to reduce backend hits (circuit breaker pattern).
+
+---
+
+## 6. Synchronization & Consistency
+- **Transactional Outbox Pattern**: All changes to queue/protected zone tables are streamed via DynamoDB Streams.
+- Downstream Lambdas update CDN edge dictionaries (Fastly) or cache (CloudFront) to keep edge and backend in sync.
+- If edge update fails, Lambda retries until successful (eventual consistency, but no distributed transactions).
+
+---
+
+## 7. Observability & Metrics
+- **System Metrics**: Lambda latency, DynamoDB throttling, API Gateway connections (monitored via CloudWatch).
+- **Business Metrics**: Queue length, average wait time, conversion rates (stored in Timestream for analytics).
+- **Dashboards**: Real-time and on-sale-specific dashboards for queue health, protected zone status, and error budgets.
+- **Alerting**: Automated alerts for queue length, error rates, and protected zone capacity.
+
+---
+
+## 8. Security, Fairness, and DDoS Protection
+- **Token Security**: Use HMAC-signed tokens, first-party cookies, and device fingerprinting to prevent abuse.
+- **Fairness**: FIFO queueing, timestamp-based ordering, and edge timestamping for global fairness.
+- **DDoS Protection**: AWS Shield, WAF, and CDN edge filtering.
+- **Bot Mitigation**: CAPTCHAs, behavioral analysis, and rate limiting.
+
+---
+
+## 9. Enhancements & Best Practices
+- **Personalized Waiting Experience**: Show marketing or helpful content while users wait.
+- **Notifications**: Alert users via SMS/email (Amazon Pinpoint) when their turn arrives.
+- **Automation**: Automate on-sale configuration, exit rate adjustments, and incident response.
+- **Fraud Detection**: Integrate with analytics to identify suspicious behavior.
+- **Edge Data Storage**: Consider storing some queue state at the edge for even lower latency.
+
+---
+
+## 10. Key Takeaways
+- **Elasticity is Crucial**: All layers (web, backend, DB) must scale elastically.
+- **Edge + Cloud Combo**: Use CDN edge for traffic absorption and AWS cloud for stateful queue management.
+- **DynamoDB Sharding**: Essential for high throughput.
+- **Leaky Bucket**: Prevents overload and ensures smooth, fair admission.
+- **Observability**: Real-time metrics and dashboards are vital for operational excellence.
+- **Cost Efficiency**: Ephemeral queue data and serverless compute keep costs manageable.
+
+---
+
+## 11. References
+- [SeatGeek AWS Blog](https://aws.amazon.com/blogs/architecture/build-a-virtual-waiting-room-with-amazon-dynamodb-and-aws-lambda-at-seatgeek/)
+- [System Design Newsletter](https://newsletter.systemdesign.one/p/virtual-waiting-room)
+- [InfoQ SeatGeek Presentation](https://www.infoq.com/presentations/ticketing-system-virtual-waiting-room/)

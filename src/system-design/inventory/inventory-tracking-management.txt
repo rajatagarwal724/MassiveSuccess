@@ -43,7 +43,8 @@ Let's discuss the Reserve/Hold Pattern
 1) User Creates an Order for certain SKUs and quantities
 2) Inventory Service Checks Availability
 3)
-    a) If Available, creates a hold record for each SKU in the reservation DB and updates the available qty in the inventory.
+    a) If Available, creates a hold record for each SKU in the reservation DB and updates the 
+        available qty in the inventory.
     b) If Not Available, stops further processing and show the required message to the user
 
 4) Initiates Payment
@@ -141,4 +142,263 @@ Reservation Service acts as central Coordinator (Orchestrated Saga)
     v
 [Reservation Service] --> (Update Reservation: CONFIRMED)
 [Inventory Service] --> (Finalize deduction)
+
+Let's use a combination of Strong consistency and high Availability
+
+1) Stong consistency to put a hold on the item
+2) High Availability using Message Broker
+
+[Reservation Service] -- synchronously hold items ---> [Inventory Service]
+     |
+     |
+     |
+[Success] 
+Emit InventoryReserved Event
+But we need to make sure that all the events for the given combination of
+sku_id and warehouse_id are processed from the same partition sequentially
+
+Auditing and Snapshots
+Both Inventory and Reservation Service should emit the required events
+1) InventoryReserved
+2) InventoryReleased
+3) InventoryAdded
+4) ReservationCreated
+5) ReservationConfirmed
+6) ReservationCancelled
+
+What is a Snapshot ?
+A Snapshot is a materialized view of the current state (
+    ie: Inventory Levels, Reservation Status
+)
+at a point in time, built by replaying all events up to that point.
+
+Snapshotting Process
+1) Read Events: Read all events for the entity (eg: could be filtered) from the event store log
+since the last Snapshot
+2) Apply Events: Apply each event in order to a state object (eg., increment/decrement inventory,
+update reservation status)
+3) Write Snapshot: Store the resulting state in a snapshot table or DB, along with the
+last event offset/Timestamp processed.
+4) Repeat: Periodically (eg hourly, daily etc) Repeat the process to keep snapshots up to date.
+
+Reporting
+1) For Quarterly/Yearly reports, query the snapshot table as
+of the desired date.
+2) For point-int-time queries, replay events from the last snapshot
+up to the target date.
+
+[Reservation/Inventory Service] --(event)--> [Kafka/Event Bus] --(sink)--> [Event Store (Cassandra)]
+[Event Store] --(replay events)--> [Snapshot Builder] --(write)--> [Snapshot Table]
+[Reporting/BI] <--(query)-- [Snapshot Table]
+
+1) Event Emission: Send events to Kafka
+Kafka Topic:- inventory-events
+
+Sample Kafka Event
+{
+    event_id: 
+    event_type: 'INVENTORY_RESERVED'
+    sku_id:
+    warehouse_id:
+    order_id/idempotency_key:
+    qty:
+    timestamp:
+    user_id:
+}
+
+2) Sink Events to Cassandra
+here event_id will act as an idempotency_key
+Create TABLE inventory_event_store (
+    sku_id,
+    warehouse_id,
+    event_id,
+    event_time,
+    event_type,
+    reservation_id/order_id,
+    qty,
+    user_id,
+    payload - (payload can store the raw event for future-proofing.),
+    Primary Key((sku_id, warehouse_id), event_time, event_id)
+) WITH CLUSTERING ORDER BY (event_time DESC, event_id DESC);
+
+As we will be making timestamp based range queries for latest records 
+having event_time DESC first in the CLUSTERING key make more sense
+
+
+3) Constructing the Snapshot DB
+CREATE TABLE inventory_snapshot (
+    sku_id TEXT,
+    warehouse_id TEXT,
+    snapshot_time TIMESTAMP,
+    available_qty INT,
+    reserved_qty INT,
+    total_qty INT,
+    last_event_time TIMESTAMP,
+    last_event_id TEXT,
+    PRIMARY KEY ((sku_id, warehouse_id), snapshot_time)
+) WITH CLUSTERING ORDER BY (snapshot_time DESC);
+
+Snapshot Building Process
+1) Read Last Snapshot
+    For each (sku_id, warehouse_id) get the latest snapshot if any
+2) Query Newer or Latest events since last recorded snapshot
+    Query inventory_event_store for all events with 
+    event_time > last_event_time
+    (or since the beginning if no snapshot)
+3) Apply Latest Events
+    For each event, update the in-memory state:
+    a) INVENTORY_RESERVED: available_qty -= qty, reservation_qty += reservation_qty
+    b) INVENTORY_CONFIRMED: reservation_qty -= qty, total_qty -= qty
+    c) INVENTORY_RELEASED: available_qty += qty, reservation_qty -= qty
+    d) INVENTORY_ADDED: total_qty += qty, available_qty = total_qty - reservation_qty
+4) Write the new state to inventory_snapshot with the current time and 
+    last event info.
+
+def build_snapshot(sku_id, warehouse_id):
+    # 1. Get last snapshot
+    last_snapshot = get_latest_snapshot(sku_id, warehouse_id)
+    state = {
+        "available_qty": last_snapshot.available_qty if last_snapshot else 0,
+        "reserved_qty": last_snapshot.reserved_qty if last_snapshot else 0,
+        "total_qty": last_snapshot.total_qty if last_snapshot else 0,
+    }
+    last_event_time = last_snapshot.last_event_time if last_snapshot else None
+
+    # 2. Get new events
+    events = get_events_from_cassandra(sku_id, warehouse_id, since=last_event_time)
+
+    # 3. Apply events
+    for event in events:
+        if event.event_type == "INVENTORY_RESERVED":
+            state["available_qty"] -= event.qty
+            state["reserved_qty"] += event.qty
+        elif event.event_type == "INVENTORY_CONFIRMED":
+            state["reserved_qty"] -= event.qty
+            state["total_qty"] -= event.qty
+        elif event.event_type == "INVENTORY_RELEASED":
+            state["reserved_qty"] -= event.qty
+            state["available_qty"] += event.qty
+        elif event.event_type == "INVENTORY_ADJUSTED":
+            state["available_qty"] = event.payload["available_qty"]
+            state["reserved_qty"] = event.payload["reserved_qty"]
+            state["total_qty"] = event.payload["total_qty"]
+        # ... handle other event types
+
+        last_event_time = event.event_time
+        last_event_id = event.event_id
+
+    # 4. Write new snapshot
+    write_snapshot_to_cassandra(
+        sku_id, warehouse_id, now(), state["available_qty"], state["reserved_qty"],
+        state["total_qty"], last_event_time, last_event_id
+    )
+
+How to Use Snapshots for Reporting
+For quarterly/yearly reports, query the inventory_snapshot table for the latest snapshot before 
+the end of the period.
+For point-in-time queries, replay events from the last snapshot up to the desired time.
+
+[Inventory/Reservation Service]
+        |
+        v
+   [Kafka Topic]
+        |
+        v
+[Kafka Connect Sink]
+        |
+        v
+[Cassandra Event Store] <--- [Snapshot Builder] ---> [Cassandra Snapshot Table]
+
+How to make Kafka Consumer Idempotent ?
+
+1) A. Option 1: Dedicated Idempotency Table
+Create a table to track processed idempotency keys:
+
+CREATE TABLE processed_reservations (
+    event_id TEXT PRIMARY KEY,
+    processed_at TIMESTAMP
+);
+
+2) here query on sku_id, warehouse_id and event_id before inserting a records can 
+make kafka consumer idempotent
+
+3) Option 3: Use Lightweight Transactions (LWT) in Cassandra
+Use Cassandra's IF NOT EXISTS clause to insert only if the idempotency key is not already present:
+
+INSERT INTO inventory_event_store (...)
+IF NOT EXISTS;
+
+event_id is the best idempotency key for your event store, since multiple events (of different types) can exist for the same reservation or order.
+Now, let’s compare the three approaches for idempotent Kafka consumers in Cassandra:
+
+1. Dedicated Deduplication Table
+
+How it works:
+
+Before processing an event, insert its event_id into a dedup table (e.g., processed_events).
+If the insert succeeds, process the event.
+If the insert fails (already exists), skip processing.
+Schema:
+CREATE TABLE processed_events (
+    event_id TEXT PRIMARY KEY,
+    processed_at TIMESTAMP
+);
+Pros:
+Simple and fast lookup.
+Keeps your event store append-only and clean.
+Can be used for deduplication across multiple tables/consumers.
+Cons:
+Extra table to maintain.
+Slightly more storage overhead.
+Two writes per event (dedup table + event store).
+
+2. Query by Key and Then Insert
+How it works:
+Before inserting an event, query the event store for event_id.
+If it exists, skip processing.
+If not, insert the event and process.
+Pros:
+No extra table needed.
+Simple logic.
+Cons:
+Not atomic: there is a race condition if two consumers process the same event at the same time (possible duplicate processing).
+Two round-trips to Cassandra (read then write).
+Not recommended for high-concurrency, high-throughput systems.
+
+3. Lightweight Transaction (LWT) with IF NOT EXISTS
+How it works:
+Insert the event into the event store using IF NOT EXISTS.
+If the insert is applied, process the event.
+If not, skip processing.
+Example:
+INSERT INTO inventory_event_store (...) IF NOT EXISTS;
+
+Pros:
+Atomic and safe: No race conditions, even with concurrent consumers.
+No extra table needed.
+Single round-trip to Cassandra.
+Cons:
+LWTs are slower than regular inserts (due to consensus protocol).
+Slightly higher latency and resource usage per write.
+Summary Table
+| Approach | Atomic? | Extra Table? | Performance | Recommended For |
+|-------------------------|---------|--------------|-------------|------------------------|
+| Dedup Table | Yes | Yes | Fast | Simpler, multi-table |
+| Query then Insert | No | No | OK | Low concurrency only |
+| LWT (IF NOT EXISTS) | Yes | No | Slower | High concurrency, safety|
+Recommendation
+For most production, high-scale, high-concurrency systems:
+Use LWT (IF NOT EXISTS) for atomic, idempotent inserts.
+This is the safest and most robust approach, especially with Kafka where duplicate delivery is possible.
+If you want to optimize for speed and can tolerate a little more complexity:
+Use a deduplication table. This is also atomic and can be faster than LWTs, especially if you batch writes.
+Avoid query-then-insert for idempotency in distributed, concurrent systems.
+TL;DR:
+> LWT (IF NOT EXISTS) is the best, safest, and most idiomatic approach for idempotent Kafka consumers in Cassandra.
+Let me know if you want example code, more on LWT performance, or how to monitor for duplicates!
+
+> If you have only one consumer per partition and process messages sequentially, you will not have a race condition with query-then-insert.
+> But for maximum safety and future flexibility, LWT is still recommended.
+
+
 

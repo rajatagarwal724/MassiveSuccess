@@ -1,0 +1,143 @@
+# Dynein – Distributed Delayed Job Queueing System (Airbnb)
+
+## 1. Introduction
+Dynein is Airbnb’s purpose-built, distributed system for reliably scheduling *and* queuing background jobs. 
+It replaces a legacy Resque/Resque-Scheduler setup that could not meet Airbnb’s scale, reliability and isolation requirements as the company moved from a Ruby on Rails monolith to a large Service-Oriented Architecture (SOA).
+
+The design cleanly separates the **scheduling** concern from the **queuing/processing** concern, enabling independent scaling and technology choices for each function.
+
+---
+## 2. Requirements & Goals
+1. **Strong Reliability** ‑ at-least-once delivery with no data loss on restarts.
+2. **Horizontal Scalability** ‑ linear scaling for both job ingestion and dispatch.
+3. **Isolation** ‑ each service should have its own queue; a noisy neighbour must not impact others.
+4. **Timing Accuracy** ‑ p95 execution deviation < 10 s for scheduled jobs.
+5. **Efficient Queue Semantics**
+   * Individual ACK/NACK.
+   * Dead-letter queues.
+   * Per-consumer worker pools.
+6. **Ease of Use** ‑ thin client API abstracting underlying infra; built-in retries/backoff.
+7. **Unscheduling Support** ‑ ability to cancel a job by ID at any time.
+
+---
+## 3. Problems with the Legacy Resque Stack
+| Issue | Explanation |
+|-------|------------|
+| **At-most-once delivery** | Resque loses messages on failures. |
+| **Single Redis bottleneck** | Resque cannot use Redis Cluster; memory & network of one node are the ceiling. |
+| **Poor Isolation** | Multiple queues share the same Redis and codebase – bad job stalls many others. |
+| **Limited Scheduler** | Resque-Scheduler stores *all* jobs in Redis memory; dequeue is O(N) scan. |
+| **Ad-hoc MySQL long-delay hack** | Separate consistent system—operationally costly & non-scalable. |
+
+---
+## 4. High-Level Architecture
+```
+          +------------------+        write               +--------------------+
+Clients → |  Dynein Service  | ─────────▶ (Inbound SQS) ▶ |  Scheduler Pods    |
+(API)     +------------------+                           |  (stateless)       |
+       (wraps SQS for metrics) ↘ enqueue @t               |   │   │   │        |
+                                         │               +----┴−−−┴−−−┴-------+
+                                         ▼
+                              +-------------------+
+                              | DynamoDB Table    |
+                              | PK: random_id     |
+                              | SK: ts#uuid       |
+                              | attrs: payload,   |
+                              |        status     |
+                              +-------------------+
+                                         ▲  (range scan @ tick, CAS → Acquired)
+                                         │
+                                         ▼ dispatch
+                             +----------------------+
+                             | Destination SQS      |
+                             |   (per-service)      |
+                             +----------------------+
+                                         ▼
+                                  Service Workers
+```
+* **Dynein Service (API layer)** – Stateless Kubernetes Deployment.
+  * Immediate jobs (< 15 min): directly enqueues to destination SQS.
+  * Delayed jobs: enqueues to *Inbound SQS* buffer and returns job_id.
+  * Provides uniform metrics, rate-limit hooks, and a cancel API.
+
+* **Inbound Queue (SQS)** – Absorbs ingestion spikes; gives operators visibility/time to react.
+
+* **Scheduler Pods** – Pull from Inbound SQS at steady rate, write job row to DynamoDB (status=Scheduled). Periodically ("scheduler tick") they:
+  1. Range-query DynamoDB partitions for `status=Scheduled` & `scheduled_time <= now`.
+  2. Atomically `UPDATE status="Acquired" IF status="Scheduled"` (optimistic locking).
+  3. On success, enqueue payload to the *Destination SQS*, then `DELETE` the row.
+
+* **Destination Queues (one SQS per service)** – Provide workload isolation, DLQs, IAM-level ACLs, encryption, etc.
+
+---
+## 5. Data Model (DynamoDB Scheduler Table)
+| Field | Type | Notes |
+|-------|------|-------|
+| **pk** | string | *Random UUID* – evenly distributes R/W, eliminates hot partitions. |
+| **sk** | string | `epochMillis#job_uuid` – lexicographically sortable; allows range scan for `sk <= now`. |
+| **payload** | map/JSON | Opaque job data & target queue name. |
+| **status** | enum | `Scheduled`, `Acquired`. |
+| **created_at** | number | Epoch ms. (optional) |
+
+Partition+Sort key pattern leverages Dynamo’s B-tree implementation for efficient `BETWEEN` scans while spreading load.
+
+---
+## 6. Scheduler Partition Assignment
+* Scheduler pods run as a **ReplicaSet/Deployment** (not StatefulSet).
+* Each pod watches the ReplicaSet membership via Kubernetes API.
+* Given sorted pod names `[P0…PN-1]` and a fixed partition-count `M`, pod `Pi` processes partitions `i, i+N, i+2N …`.
+* Scaling up/down is automatic; no config file edits.
+
+---
+## 7. Concurrency & Delivery Guarantees
+* **At-least-once** – Duplicate delivery possible but loss impossible.
+* CAS (`ConditionalUpdate`) ensures only one pod acquires a job.
+* SQS visibility timeout & ACK semantics handle consumer-side retries.
+
+---
+## 8. Performance & Cost Analysis
+* Quartz+MySQL: ~1 000 QPS per r4.8xlarge; high query amplification (7 queries per job).
+* DynamoDB design: 1 PUT (enqueue), then GET+UPDATE+DELETE (dispatch) ⇒ 2 WCUs + 1 RCU/job.
+* 1 000 QPS at **< ⅓** cost of RDS-based solution; virtually limitless horizontal scaling.
+* DynamoDB auto-scaling allows right-sizing for seasonal patterns (peak vs off-peak).
+
+---
+## 9. Reliability & Fault-Tolerance
+* **Stateless services** – All state in SQS or DynamoDB.
+* **Back-pressure via Inbound SQS** – Absorbs spikes; alarm if backlog grows.
+* **Dead-Letter Queues** for poison messages per consumer queue.
+* **Multi-AZ** – DynamoDB & SQS are regional services; scheduler pods run on multiple AZ-spread nodes.
+
+---
+## 10. Security & Isolation
+* Per-service SQS queues with IAM policies prevent data leakage.
+* Server-side encryption (SSE) enabled for all queues.
+* Client libraries hide infrastructure details and enforce best practices.
+
+---
+## 11. Operational Insights
+* **Observability** – Dynein API records metrics for enqueue, dequeue, scheduling latency, backlog depth.
+* **Kubernetes HPA** – Scheduler Deployment can auto-scale on CPU or custom CloudWatch metrics.
+* **Swap-ability** – KV-store abstraction lets teams swap DynamoDB with RocksDB, MySQL etc.
+* **Open-source** – Available at `github.com/airbnb/dynein`.
+
+---
+## 12. Lessons Learned
+1. **Separate concerns** – Scheduling and queuing have different SLAs & trade-offs; do not couple them.
+2. **Random-key sharding** eliminates hot partitions without manual sharding logic.
+3. **Stateless services + managed AWS primitives** drastically reduce operational overhead.
+4. **Cost visibility** – Moving from provisioned RDS to auto-scalable DynamoDB saved ~70% at Airbnb scale.
+5. **Dynamic scheduler membership** is critical when running on ephemeral container infrastructure.
+
+---
+## 13. Future Work (from Airbnb Post)
+* Explore replacing SQS with other queue back-ends if requirements evolve.
+* Enhance timing accuracy (< 1 s p95) for ultra-low-latency use-cases.
+* Add richer job-cancellation & batch APIs.
+
+---
+## 14. Conclusion
+Dynein demonstrates how a lightweight, decoupled architecture built on managed cloud primitives can deliver high reliability, low cost, and massive scalability for delayed job scheduling. Key to its success is treating *scheduler* and *queue* as distinct systems, leveraging DynamoDB’s partition/sort-key model for efficient time-range scans, and embracing stateless containers for dynamic horizontal scaling.
+
+---
+*Prepared 17 Jun 2025 by Cascade AI for Principal-level system-design study.*

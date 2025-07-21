@@ -7,6 +7,7 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import lombok.Data;
+import lombok.Getter;
 
 
 interface Observer {
@@ -153,6 +154,7 @@ class Door {
 }
 
 
+@Data
 abstract class Display implements Observer {
     protected int currentFloor;
     protected Direction currentDirection;
@@ -175,7 +177,7 @@ abstract class Display implements Observer {
     public abstract void display();
 }
 
-@Data
+
 class ElevatorDisplay extends Display {
     private int capacity;
     private int currentPassengers;
@@ -196,7 +198,7 @@ class ElevatorDisplay extends Display {
     }
 }
 
-@Data
+@Getter
 class HallDisplay extends Display {
     public HallDisplay(int currentFloor, Direction currentDirection) {
         super(currentFloor, currentDirection);
@@ -278,10 +280,10 @@ class IdleElevatorState implements ElevatorState {
             elevator.removeRequest(destinationFloorNumber);
         } else if (elevator.getCurrentFloor() < destinationFloorNumber) {
             elevator.setState(new MovingUpElevatorState());
-            elevator.move();
+//            elevator.move();
         } else {
             elevator.setState(new MovingDownElevatorState());
-            elevator.move();
+//            elevator.move();
         }
     }
 
@@ -300,7 +302,7 @@ class IdleElevatorState implements ElevatorState {
     }
 }
 
-        
+
 @Data
 class Elevator {
     private String id;
@@ -313,7 +315,7 @@ class Elevator {
     private List<Integer> pendingRequests;
     private Direction currentDirection;
 
-    public Elevator(String id, Door door, ElevatorState state, int currentFloor, 
+    public Elevator(String id, Door door, ElevatorState state, int currentFloor,
                    ElevatorPanel elevatorPanel, Display elevatorDisplay) {
         this.id = id;
         this.door = door;
@@ -520,7 +522,7 @@ class LOOKSchedulingStrategy implements ElevatorSchedulingStrategy {
         List<Integer> pendingRequests = elevator.getPendingRequests();
         int closestFloor = pendingRequests.get(0);
         int minDistance = Math.abs(elevator.getCurrentFloor() - closestFloor);
-        
+
         for (int floor : pendingRequests) {
             int distance = Math.abs(elevator.getCurrentFloor() - floor);
             if (distance < minDistance) {
@@ -528,7 +530,7 @@ class LOOKSchedulingStrategy implements ElevatorSchedulingStrategy {
                 closestFloor = floor;
             }
         }
-        
+
         return closestFloor;
     }
 }
@@ -558,7 +560,7 @@ class ElevatorSystem {
         }
 
         elevator.addRequest(floorNumber);
-        
+
         // If elevator is idle, start moving
         if (elevator.getState() instanceof IdleElevatorState) {
             int nextFloor = schedulingStrategy.getNextFloor(elevator);
@@ -596,20 +598,20 @@ class ElevatorSystem {
 
         Elevator elevator1 = new Elevator(
             "1", new Door(DoorState.CLOSED), new IdleElevatorState(),
-             0, 
-             elevatorPanel, 
+             0,
+             elevatorPanel,
              new ElevatorDisplay(0, Direction.DEFAULT, 10)
         );
         Elevator elevator2 = new Elevator(
-            "2", new Door(DoorState.CLOSED), new IdleElevatorState(), 
-            0, 
-            elevatorPanel, 
+            "2", new Door(DoorState.CLOSED), new IdleElevatorState(),
+            0,
+            elevatorPanel,
             new ElevatorDisplay(0, Direction.DEFAULT, 10)
         );
         Elevator elevator3 = new Elevator(
-            "3", new Door(DoorState.CLOSED), new IdleElevatorState(), 
-            0, 
-            elevatorPanel, 
+            "3", new Door(DoorState.CLOSED), new IdleElevatorState(),
+            0,
+            elevatorPanel,
             new ElevatorDisplay(0, Direction.DEFAULT, 10)
         );
 

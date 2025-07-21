@@ -1,0 +1,645 @@
+# TinyURL System Design - Principal Engineer Perspective
+
+## 1. Problem Definition and Scope
+
+### Functional Requirements
+
+- Create shortened URLs from long URLs
+- Redirect users from shortened URLs to original URLs
+- Optional custom short URLs (e.g., tinyurl.com/my-custom-path)
+- URL analytics and metrics (clicks, geographic data, referrers)
+- User accounts with URL management dashboards
+- API access for programmatic URL shortening and management
+- URL expiration and time-to-live (TTL) functionality
+- QR code generation for shortened URLs
+
+### Non-Functional Requirements
+
+- High availability (99.99% uptime) - critical for a URL redirection service
+- Low latency (< 10ms for redirects)
+- Horizontal scalability to handle billions of requests per day
+- Data durability with no URL loss
+- Security against malicious URL attacks
+- Global distribution for low-latency worldwide access
+
+### Constraints and Considerations
+
+- System should handle at least 100M new URLs per month
+- Average URL storage: 500 bytes for long URL + metadata
+- Read-to-write ratio of approximately 100:1
+- Data retention for at least 5 years for active URLs
+- Peak traffic handling: 10x normal load during marketing campaigns
+
+## 2. High-Level Architecture
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│                 │     │                 │     │                 │
+│  Client/Browser │────▶│   API Gateway  │────▶│   Load Balancer │
+│                 │     │                 │     │                 │
+└─────────────────┘     └─────────────────┘     └────────┬────────┘
+                                                         │
+┌─────────────────┐     ┌─────────────────┐     ┌────────▼────────┐
+│                 │     │                 │     │                 │
+│ Cache Clusters  │◀───▶│  URL Services   │◀───▶│    Web Servers  │
+│                 │     │                 │     │                 │
+└─────────────────┘     └─────────────────┘     └────────┬────────┘
+                                │                        │
+                                │                        │
+                        ┌───────▼────────┐      ┌────────▼────────┐
+                        │                │      │                 │
+                        │  Database Layer │      │  Analytics      │
+                        │                │      │  Service        │
+                        └────────────────┘      └─────────────────┘
+```
+
+## 3. Core System Components
+
+### 3.1 Application Tier
+
+#### URL Shortening Service
+
+- **URL ID Generation Approaches**:
+  - **Counter-based**: Distributed sequence generators with shard-aware counters
+  - **Hash-based**: MD5/SHA-256 with collision detection and resolution
+  - **Base62 Encoding**: For human-readable short URLs without confusing characters
+  - **Two-Phase Generation**: Pre-allocation of URL IDs in background for instant assignment
+
+```java
+public class UrlShortener {
+    private static final String ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    private static final int BASE = ALPHABET.length();
+    private final DistributedCounter counter;
+    private final UrlValidator validator;
+    
+    public String shortenUrl(String longUrl) {
+        // Validate URL
+        if (!validator.isValid(longUrl)) {
+            throw new InvalidUrlException("Invalid URL format");
+        }
+        
+        // Get next ID from distributed counter
+        long id = counter.getNextId();
+        
+        // Convert to base62 representation
+        return encodeBase62(id);
+    }
+    
+    private String encodeBase62(long id) {
+        StringBuilder shortUrl = new StringBuilder();
+        while (id > 0) {
+            shortUrl.append(ALPHABET.charAt((int) (id % BASE)));
+            id /= BASE;
+        }
+        // Pad to ensure minimum length if needed
+        while (shortUrl.length() < 6) {
+            shortUrl.append(ALPHABET.charAt(0));
+        }
+        return shortUrl.reverse().toString();
+    }
+}
+```
+
+#### URL Redirection Service
+
+- **Optimized for read-heavy workload**
+- **Multi-layer caching** with progressive cache warming
+- **Intelligent routing** based on user location
+- **Stateless design** for horizontal scaling
+
+```java
+public class RedirectionService {
+    private final Cache<String, String> localCache;  // L1 cache (in-memory)
+    private final DistributedCache distributedCache; // L2 cache (Redis)
+    private final UrlRepository repository;        // Database access
+    private final MetricsCollector metricsCollector;
+    
+    public RedirectResult getRedirectUrl(String shortUrl, RequestContext context) {
+        String longUrl;
+        
+        // Try L1 cache first (microsecond latency)
+        longUrl = localCache.get(shortUrl);
+        if (longUrl != null) {
+            recordStats(shortUrl, context, CacheHitLevel.L1);
+            return new RedirectResult(longUrl, true);
+        }
+        
+        // Try L2 distributed cache (millisecond latency)
+        longUrl = distributedCache.get(shortUrl);
+        if (longUrl != null) {
+            // Populate L1 cache for future requests
+            localCache.put(shortUrl, longUrl);
+            recordStats(shortUrl, context, CacheHitLevel.L2);
+            return new RedirectResult(longUrl, true);
+        }
+        
+        // Cache miss - query database (10+ millisecond latency)
+        Optional<UrlMapping> mapping = repository.findByShortUrl(shortUrl);
+        if (mapping.isPresent()) {
+            longUrl = mapping.get().getLongUrl();
+            // Populate both cache levels
+            distributedCache.put(shortUrl, longUrl);
+            localCache.put(shortUrl, longUrl);
+            recordStats(shortUrl, context, CacheHitLevel.NONE);
+            return new RedirectResult(longUrl, false);
+        }
+        
+        return RedirectResult.NOT_FOUND;
+    }
+    
+    private void recordStats(String shortUrl, RequestContext context, CacheHitLevel cacheLevel) {
+        // Asynchronously record metrics to avoid blocking the redirect
+        CompletableFuture.runAsync(() -> {
+            metricsCollector.recordClick(shortUrl, context.getIpAddress(), 
+                    context.getUserAgent(), context.getReferrer(), cacheLevel);
+        });
+    }
+}
+```
+
+### 3.2 Data Storage Layer
+
+#### Primary Database Schema
+
+- **Sharded relational database** (e.g., PostgreSQL, MySQL with Vitess)
+- **Time-series partitioning** for efficient data management
+- **Optimized indexes** for fast lookup by short URL
+
+```sql
+-- Primary URL mappings table
+CREATE TABLE url_mappings (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    short_url VARCHAR(8) NOT NULL,
+    long_url VARCHAR(2048) NOT NULL,
+    user_id BIGINT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NULL,
+    is_custom BOOLEAN NOT NULL DEFAULT FALSE,
+    status TINYINT NOT NULL DEFAULT 1, -- 1: active, 0: inactive, 2: deleted
+    PRIMARY KEY (id),
+    UNIQUE KEY (short_url),
+    INDEX (user_id),
+    INDEX (expires_at),
+    INDEX (created_at)
+) PARTITION BY RANGE (UNIX_TIMESTAMP(created_at)) (
+    PARTITION p0 VALUES LESS THAN (UNIX_TIMESTAMP('2022-01-01')),
+    PARTITION p1 VALUES LESS THAN (UNIX_TIMESTAMP('2022-04-01')),
+    PARTITION p2 VALUES LESS THAN (UNIX_TIMESTAMP('2022-07-01')),
+    PARTITION p3 VALUES LESS THAN (UNIX_TIMESTAMP('2022-10-01')),
+    PARTITION p4 VALUES LESS THAN (UNIX_TIMESTAMP('2023-01-01')),
+    PARTITION p5 VALUES LESS THAN (UNIX_TIMESTAMP('2023-04-01')),
+    PARTITION p6 VALUES LESS THAN (UNIX_TIMESTAMP('2023-07-01')),
+    PARTITION p7 VALUES LESS THAN (UNIX_TIMESTAMP('2023-10-01')),
+    PARTITION p8 VALUES LESS THAN (UNIX_TIMESTAMP('2024-01-01')),
+    PARTITION p9 VALUES LESS THAN (UNIX_TIMESTAMP('2024-04-01')),
+    PARTITION p10 VALUES LESS THAN (UNIX_TIMESTAMP('2024-07-01')),
+    PARTITION p11 VALUES LESS THAN (UNIX_TIMESTAMP('2024-10-01')),
+    PARTITION p12 VALUES LESS THAN (UNIX_TIMESTAMP('2025-01-01')),
+    PARTITION future VALUES LESS THAN MAXVALUE
+);
+
+-- Click analytics (can be separated into its own database)
+CREATE TABLE url_clicks (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    short_url VARCHAR(8) NOT NULL,
+    clicked_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ip_address VARCHAR(45), -- IPv6 support
+    user_agent VARCHAR(512),
+    referer VARCHAR(2048),
+    country_code CHAR(2),
+    region_code VARCHAR(3),
+    city VARCHAR(50),
+    PRIMARY KEY (id),
+    INDEX (short_url),
+    INDEX (clicked_at)
+) PARTITION BY RANGE (UNIX_TIMESTAMP(clicked_at)) (
+    PARTITION p0 VALUES LESS THAN (UNIX_TIMESTAMP('2022-01-01')),
+    -- Additional partitions...
+);
+```
+
+#### Caching Architecture
+
+- **Multi-Level Caching Strategy**
+  - **L1**: In-memory cache within application servers (e.g., Caffeine/Guava Cache)
+  - **L2**: Distributed cache cluster (Redis/Memcached)
+  - **L3**: Database result cache
+
+- **Predictive Cache Warming**
+  - Background service to pre-cache popular URLs
+  - Intelligent TTL based on URL access patterns
+  - Circuit breakers to prevent cache stampedes
+
+- **Cache Consistency Strategies**
+  - Write-through for immediate consistency
+  - Cache invalidation on URL updates
+  - Time-based expiration as fallback
+
+### 3.3 Analytics and Telemetry
+
+- **Real-time processing pipeline** using Kafka/Kinesis
+- **Time-series databases** for storing click metrics (InfluxDB/TimescaleDB)
+- **OLAP storage** for analytical queries (ClickHouse/Druid)
+- **Geolocation enrichment** with MaxMind GeoIP or similar services
+
+## 4. Advanced System Requirements
+
+### 4.1 Security Considerations
+
+- **Rate limiting** to prevent abuse:
+  - Token bucket algorithm with distributed rate limiter
+  - Per-IP, per-user, and global rate limits
+  - Graduated response (warn, delay, block)
+
+- **URL scanning**:
+  - Integration with threat intelligence services (Google Safe Browsing, PhishTank)
+  - Synchronous checking for suspicious URLs
+  - Asynchronous periodic rescanning of existing URLs
+
+- **HTTPS enforcement** and security headers
+- **CSRF protection** for API endpoints
+- **Input validation** and output encoding to prevent XSS/CSRF
+
+### 4.2 Data Privacy & Compliance
+
+- **Personal data minimization**:
+  - Anonymize IP addresses for analytics (drop last octet)
+  - Configurable data retention policies
+  - User-controlled URL deletion
+
+- **Regulatory compliance**:
+  - GDPR compliance for EU users
+  - CCPA compliance for California users
+  - Data export and deletion capabilities
+
+### 4.3 Global Distribution
+
+- **CDN integration** (Cloudflare/Fastly/Akamai):
+  - Edge caching of popular redirects
+  - TLS termination at edge
+  - DDoS protection
+
+- **Multi-region deployment**:
+  - Active-active configuration
+  - Regional database clusters
+  - Geo-DNS routing to closest region
+
+## 5. Scaling Strategies
+
+### 5.1 Database Scaling
+
+- **Horizontal sharding** by short URL prefix or hash:
+```
+┌───────────────────┐   ┌───────────────────┐   ┌───────────────────┐
+│ Shard 1 (a-i)    │   │ Shard 2 (j-r)    │   │ Shard 3 (s-z,0-9)│
+│                   │   │                   │   │                   │
+│ ┌─────────────┐  │   │ ┌─────────────┐  │   │ ┌─────────────┐  │
+│ │ Primary     │  │   │ │ Primary     │  │   │ │ Primary     │  │
+│ └─────┬───────┘  │   │ └─────┬───────┘  │   │ └─────┬───────┘  │
+│       │          │   │       │          │   │       │          │
+│ ┌─────▼───────┐  │   │ ┌─────▼───────┐  │   │ ┌─────▼───────┐  │
+│ │ Replica     │  │   │ │ Replica     │  │   │ │ Replica     │  │
+│ └─────────────┘  │   │ └─────────────┘  │   │ └─────────────┘  │
+└───────────────────┘   └───────────────────┘   └───────────────────┘
+```
+
+- **Read replicas** for redirect queries
+- **Connection pooling** and query optimization
+- **Archival strategy** for old/unused URLs
+
+### 5.2 Application Scaling
+
+- **Stateless microservices** for independent scaling
+- **Auto-scaling** based on load metrics
+- **Blue-green deployments** for zero-downtime updates
+- **Circuit breakers** for fault isolation
+
+### 5.3 Cache Scaling
+
+- **Consistent hashing** for distributed cache cluster
+- **Separate hot/cold caches** based on access patterns
+- **Cache hierarchy** optimization based on latency requirements
+
+## 6. Reliability Engineering
+
+### 6.1 Monitoring and Observability
+
+- **KEY METRICS**:
+  - **Redirection latency** (p50, p95, p99)
+  - **Cache hit ratios** across cache levels
+  - **Error rates** by error type and endpoint
+  - **Database load** metrics (queries/sec, replication lag)
+
+- **LOGGING**:
+  - Structured logging with context IDs
+  - Sampling high-volume logs
+  - Log aggregation and analysis (ELK stack)
+
+- **ALERTING**:
+  - Multi-level alerts based on severity
+  - SLO-based alerting rather than threshold-based
+  - Automatic remediation for common issues
+
+### 6.2 Disaster Recovery
+
+- **Multi-region backups** with point-in-time recovery
+- **Recovery time objective (RTO)**: < 30 minutes
+- **Recovery point objective (RPO)**: < 5 minutes
+- **Chaos engineering** practices to verify recovery capabilities
+
+## 7. Performance Optimizations
+
+### 7.1 Read Path Optimization
+
+- **URL lookup optimization**:
+  - Bloom filters to avoid DB queries for non-existent URLs
+  - Tiered cache strategy with intelligent eviction policies
+  - HTTP/2 Server Push for predicted resources
+
+- **Redirect handling**:
+  - HTTP 307 redirects for temporary URLs
+  - HTTP 308 redirects for permanent URLs
+  - Browser caching headers when appropriate
+
+### 7.2 Write Path Optimization
+
+- **Asynchronous processing** for non-critical operations
+- **Batched database operations** for analytics data
+- **Idempotent API design** for retry safety
+
+## 8. Implementation Trade-offs and Decisions
+
+### 8.1 Storage Trade-offs
+
+1. **NoSQL vs. RDBMS**:
+   - **Decision**: RDBMS for core URL mapping, NoSQL for analytics
+   - **Rationale**: ACID properties important for URL operations, but analytics benefits from NoSQL flexibility
+
+2. **Caching Strategy**:
+   - **Decision**: Multi-level cache with short TTLs
+   - **Rationale**: Balance between performance and potential stale data
+
+### 8.2 Encoding Trade-offs
+
+1. **URL Length**:
+   - **Decision**: 6-8 character short URLs
+   - **Rationale**: Balance between URL space and user experience
+   - **Calculation**: With 62 characters and 7 digits, we have 62^7 = ~3.5 trillion possibilities
+
+2. **Custom URLs**:
+   - **Decision**: Allow custom URLs with additional validation
+   - **Rationale**: User experience benefit outweighs implementation complexity
+
+## 9. System Evolution and Future Work
+
+### 9.1 Near-term Improvements
+
+- **URL preview functionality** before redirect
+- **Advanced analytics dashboard** with ML-based insights
+- **Mobile SDK** for native app integration
+- **Webhooks** for URL click notifications
+
+### 9.2 Long-term Vision
+
+- **Predictive caching** using ML models
+- **Smart routing** based on user context
+- **Content-aware short URLs** that suggest domain meaning
+- **Enterprise single sign-on** integration
+
+## 10. Appendix: Capacity Planning
+
+### Storage Requirements
+
+- **URL Mappings**:
+  - 100M new URLs per month
+  - ~500 bytes per record (including indexes)
+  - ~50GB per month, ~3TB for 5 years
+
+- **Click Analytics**:
+  - 100:1 read:write ratio = ~10B clicks per month
+  - ~200 bytes per click record
+  - ~2TB per month (requires partitioning/archiving strategy)
+
+### Cache Requirements
+
+- Assuming 20% of URLs generate 80% of traffic:
+  - Top 20M URLs = ~10GB memory for URL mapping cache
+  - Distributed across cluster with 30% headroom = ~15GB total
+
+### Network Requirements
+
+- 10B redirects per month = ~3,800 requests per second average
+- Peak traffic at 10x = ~38,000 requests per second
+- With 1KB average response size = ~38 MB/s bandwidth at peak
+
+## 11. Appendix: API Specifications
+
+### RESTful API
+
+```
+POST /api/v1/urls
+Request: {
+  "longUrl": "https://example.com/very/long/url",
+  "customAlias": "my-brand",  // optional
+  "expiresAt": "2024-12-31T23:59:59Z",  // optional
+  "userToken": "auth-token-here"  // optional
+}
+Response: {
+  "shortUrl": "https://tinyurl.com/abc123",
+  "longUrl": "https://example.com/very/long/url",
+  "expiresAt": "2024-12-31T23:59:59Z",
+  "createdAt": "2023-05-15T14:30:00Z"
+}
+
+GET /api/v1/urls/{shortUrlId}
+Response: {
+  "shortUrl": "https://tinyurl.com/abc123",
+  "longUrl": "https://example.com/very/long/url",
+  "expiresAt": "2024-12-31T23:59:59Z",
+  "createdAt": "2023-05-15T14:30:00Z",
+  "totalClicks": 42,
+  "analytics": {
+    "dailyClicks": [["2023-05-15", 12], ["2023-05-16", 30]],
+    "topReferrers": [["google.com", 15], ["twitter.com", 10]],
+    "topCountries": [["US", 20], ["UK", 8], ["IN", 5]]
+  }
+}
+```
+
+
+## Bloom Filter Implementation for URL Lookup Optimization
+
+### Overview
+Bloom filters are probabilistic data structures used to efficiently determine whether an element is potentially in a set or definitely not in a set. In our TinyURL service, Bloom filters provide a memory-efficient mechanism to quickly check URL existence before performing expensive database queries.
+
+### Implementation Details
+
+#### Key Components
+1. **BitSet**: A bit array used to represent the set membership
+2. **Hash Functions**: Multiple hash functions to distribute elements across the bit array
+3. **Probabilistic Membership Test**: Ability to check if an element might exist or definitely does not exist
+
+#### Sample Java Implementation
+```java
+public class ShortUrlBloomFilter {
+    private final BitSet bitSet;
+    private final int size;
+    private final int numHashFunctions;
+    private final HashFunction[] hashFunctions;
+
+    public ShortUrlBloomFilter(int size, int numHashFunctions) {
+        this.size = size;
+        this.numHashFunctions = numHashFunctions;
+        this.bitSet = new BitSet(size);
+        this.hashFunctions = initializeHashFunctions();
+    }
+
+    public void add(String shortUrl) {
+        for (HashFunction hashFunc : hashFunctions) {
+            int hash = hashFunc.hash(shortUrl) % size;
+            bitSet.set(hash);
+        }
+    }
+
+    public boolean mightContain(String shortUrl) {
+        for (HashFunction hashFunc : hashFunctions) {
+            int hash = hashFunc.hash(shortUrl) % size;
+            if (!bitSet.get(hash)) {
+                return false;  // Definitely not in set
+            }
+        }
+        return true;  // Might be in set
+    }
+
+    private HashFunction[] initializeHashFunctions() {
+        // Initialize multiple independent hash functions
+        // Use techniques like double hashing or cryptographic hash functions
+    }
+}
+
+
+Integration with URL Redirection Service
+
+
+public class OptimizedRedirectionService {
+    private final ShortUrlBloomFilter bloomFilter;
+    private final UrlCacheService cacheService;
+    private final UrlDatabaseService dbService;
+
+    public RedirectResult getRedirectUrl(String shortUrl, RequestContext context) {
+        // Quick Bloom filter check before expensive lookups
+        if (!bloomFilter.mightContain(shortUrl)) {
+            return RedirectResult.NOT_FOUND;
+        }
+
+        // Proceed with cache and database lookups
+        UrlEntry cachedEntry = cacheService.get(shortUrl);
+        if (cachedEntry != null) {
+            return RedirectResult.fromCacheEntry(cachedEntry);
+        }
+
+        UrlEntry dbEntry = dbService.findByShortUrl(shortUrl);
+        return dbEntry != null 
+            ? RedirectResult.fromDatabaseEntry(dbEntry) 
+            : RedirectResult.NOT_FOUND;
+    }
+}
+
+Performance and Memory Considerations
+Space Efficiency: Constant memory usage regardless of number of entries
+False Positive Rate: Configurable by adjusting bit array size and hash function count
+Lookup Complexity: O(k), where k is the number of hash functions
+Maintenance Strategies
+Periodic Rebuilding: Reconstruct Bloom filter periodically to manage deletions
+Dynamic Sizing: Adjust filter size based on expected URL volume
+Monitoring: Track false positive rates and adjust parameters
+Limitations
+Cannot remove individual elements
+Probabilistic nature allows false positives
+Requires careful tuning of parameters
+Best Practices
+Use multiple independent hash functions
+Choose appropriate bit array size
+Monitor and adjust false positive rates
+Combine with caching and database strategies
+
+CREATE TABLE url_mappings (
+    short_url_code CHAR(7) PRIMARY KEY,
+    long_url VARCHAR(2048) NOT NULL,
+    user_id BIGINT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP,
+    click_count BIGINT DEFAULT 0,
+    INDEX (user_id, created_at),
+    INDEX (long_url(255), user_id)  -- Partial index on long_url to handle duplication check
+);
+
+
+CDN Integration for TinyURL Redirection
+How CDN Interacts with TinyURL
+A Content Delivery Network (CDN) can cache HTTP redirect responses for popular short URLs, reducing backend load and improving latency for end users. Here’s how the interaction works:
+
+1. User Requests Short URL
+User accesses https://tinyurl.com/abc123.
+2. DNS/HTTP Routing
+DNS routes the request to the CDN (e.g., Cloudflare, Akamai, Fastly).
+3. CDN Edge Check
+CDN checks if it has a cached HTTP redirect for /abc123.
+Cache Hit: CDN returns the cached 301/302 redirect to the long URL.
+Cache Miss: CDN forwards the request to the TinyURL backend.
+4. Origin Server Response
+Backend looks up the short code, returns a 301/302 redirect to the long URL.
+CDN caches this response (based on cache-control headers) for future requests.
+5. Benefits
+Reduced Latency: Users get instant redirects from edge locations.
+Offload Origin: Most traffic is served by CDN, reducing backend/database load.
+Global Reach: Fast responses worldwide.
+6. Cache-Control Example
+http
+CopyInsert
+Cache-Control: public, max-age=3600
+7. Invalidation
+If a short URL’s destination changes, purge or invalidate the CDN cache for that path.
+Diagram: TinyURL with CDN Redirection
+
+graph LR
+    U[User] -- Short URL Request --> C[CDN Edge Node]
+    C -- Cache Hit: 301/302 Redirect --> U
+    C -- Cache Miss --> O[TinyURL Backend]
+    O -- 301/302 Redirect --> C
+    C -- Forward Redirect --> U
+
+graph LR
+    U[User] -- Short URL Request --> C[CDN Edge Node]
+    C -- Cache Hit: 301/302 Redirect --> U
+    C -- Cache Miss --> O[TinyURL Backend]
+    O -- 301/302 Redirect --> C
+    C -- Forward Redirect --> U
+Advanced Considerations
+For personalized or geo-based redirects, configure CDN cache keys or bypass cache as needed.
+Use CDN analytics to monitor popular URLs and optimize cache TTLs.
+Summary:
+A CDN acts as a high-performance caching layer for TinyURL, serving redirects for popular short URLs directly from edge locations and dramatically improving scalability and user experience.
+
+who makes the request to CDN ? API Gateway 
+
+The end user’s browser (or client) makes the request directly to the CDN, not to your API Gateway.
+
+How it works
+DNS for your domain (e.g., tinyurl.com) is configured to point to the CDN.
+When a user clicks or enters a short URL (https://tinyurl.com/abc123), their browser resolves the domain to the CDN’s edge server IP.
+The CDN acts as the “front door” to your service.
+The CDN checks its cache for the redirect response.
+If cached, the CDN responds immediately.
+If not cached, the CDN forwards the request to your backend origin (which could be your API Gateway, Load Balancer, or directly to your application servers).
+Role of API Gateway
+The API Gateway sits behind the CDN and only receives requests that are cache misses (i.e., not already cached by the CDN).
+The CDN is responsible for routing, caching, and serving static or cacheable content.
+The API Gateway is responsible for authenticating, routing, and applying business logic for dynamic or uncached requests.
+Visual Flow
+User → CDN (Edge)
+CDN (Cache Hit) → User
+CDN (Cache Miss) → API Gateway (Origin) → App/DB
+Summary:
+The CDN is the first point of contact for user requests. The API Gateway only handles requests that are not served from the CDN cache. This setup offloads a huge amount of traffic from your backend and is standard for high-scale systems like TinyURL.
+

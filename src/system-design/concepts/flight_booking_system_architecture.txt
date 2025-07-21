@@ -1,0 +1,697 @@
+# Flight Booking System: Architecture & Scalability Design
+
+## 1. System Architecture Overview
+
+### 1.1 Architectural Patterns
+
+The Flight Booking System employs a combination of architectural patterns:
+
+- **Microservices Architecture**: Core functionality decomposed into independent services
+- **Event-Driven Architecture**: Asynchronous communication via events
+- **CQRS Pattern**: Separation of read and write operations
+- **API Gateway Pattern**: Unified entry point for clients
+- **Bulkhead Pattern**: Isolation of failures
+- **Circuit Breaker Pattern**: Graceful handling of service failures
+- **Saga Pattern**: Distributed transaction management
+- **Cache-Aside Pattern**: Performance optimization for reads
+
+### 1.2 High-Level Architecture Diagram
+
+```
+┌─────────────────┐      ┌──────────────┐      ┌─────────────────┐
+│                 │      │              │      │                 │
+│  Web/Mobile     │─────▶│  API Gateway │─────▶│  Load Balancer  │
+│  Applications   │      │              │      │                 │
+│                 │      └──────────────┘      └────────┬────────┘
+└─────────────────┘                                     │
+                                                        ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                                                                         │
+│                             Service Mesh                                │
+│                                                                         │
+├─────────────┬─────────────┬─────────────┬─────────────┬─────────────┬──┘
+│             │             │             │             │             │
+▼             ▼             ▼             ▼             ▼             ▼
+┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐
+│         │   │         │   │         │   │         │   │         │   │         │
+│  User   │   │ Search  │   │ Booking │   │ Payment │   │ Check-in│   │ Notifi- │
+│ Service │   │ Service │   │ Service │   │ Service │   │ Service │   │ cation  │
+│         │   │         │   │         │   │         │   │         │   │ Service │
+└────┬────┘   └────┬────┘   └────┬────┘   └────┬────┘   └────┬────┘   └────┬────┘
+     │             │             │             │             │             │
+     ▼             ▼             ▼             ▼             ▼             ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                             Message Broker                                  │
+│                          (Kafka/RabbitMQ)                                   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+     │             │             │             │             │             │
+     ▼             ▼             ▼             ▼             ▼             ▼
+┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐
+│         │   │         │   │         │   │         │   │         │   │         │
+│ Postgres│   │Elastic- │   │ Redis   │   │ MongoDB │   │ Time    │   │ Airline │
+│ (Trans- │   │ search  │   │ (Cache) │   │ (Flex   │   │ Series  │   │ Inte-   │
+│ actions)│   │ (Search)│   │         │   │ Schema) │   │ DB      │   │ gration │
+└─────────┘   └─────────┘   └─────────┘   └─────────┘   └─────────┘   └─────────┘
+```
+
+### 1.3 Deployment Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                                                                     │
+│                     Global Load Balancer / CDN                      │
+│                                                                     │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                │
+                                ▼
+          ┌───────────────────────────────────────────┐
+          │                                           │
+          │            API Gateway Cluster            │
+          │                                           │
+          └───────────────────┬───────────────────────┘
+                              │
+           ┌─────────────────┴┬─────────────────────┐
+           │                  │                      │
+           ▼                  ▼                      ▼
+┌────────────────┐  ┌────────────────┐     ┌────────────────┐
+│                │  │                │     │                │
+│  Region 1      │  │  Region 2      │     │  Region 3      │
+│  (US-EAST)     │  │  (EU-WEST)     │     │  (ASIA-EAST)   │
+│                │  │                │     │                │
+└────────────────┘  └────────────────┘     └────────────────┘
+       │                   │                       │
+       ▼                   ▼                       ▼
+┌──────────────┐    ┌──────────────┐       ┌──────────────┐
+│              │    │              │       │              │
+│  Kubernetes  │    │  Kubernetes  │       │  Kubernetes  │
+│  Cluster     │    │  Cluster     │       │  Cluster     │
+│              │    │              │       │              │
+└──────────────┘    └──────────────┘       └──────────────┘
+```
+
+## 2. Scalability Design
+
+### 2.1 Horizontal Scaling Strategy
+
+#### Core Services
+
+- **User Service**: Scaled based on active user count
+  - Typically 1 instance per 50,000 active users
+  - Autoscaling triggered at 70% CPU utilization
+
+- **Search Service**: Scaled based on search request volume
+  - Higher capacity during peak booking periods
+  - Geo-distributed instances for regional traffic
+  - Predictive scaling based on historical patterns
+
+- **Booking Service**: Scaled based on booking request volume
+  - Critical path with strict performance requirements
+  - Minimum 3 instances for high availability
+  - Database connection pooling to optimize resources
+
+- **Payment Service**: Scaled based on transaction volume
+  - Isolated scaling for PCI compliance reasons
+  - Circuit breakers to protect against gateway failures
+  - Higher redundancy for payment processing
+
+#### Database Tier
+
+- **PostgreSQL**: Primary-replica configuration
+  - Read replicas scaled based on read traffic
+  - Cross-region replicas for disaster recovery
+  - Connection pooling to maximize utilization
+
+- **MongoDB**: Sharded cluster
+  - Sharded by user_id for user profiles
+  - Sharded by date ranges for historical data
+  - Replica sets for high availability
+
+- **Redis**: Master-replica cluster
+  - Read replicas for cache distribution
+  - Redis Cluster for partitioning
+  - Memory optimization for high-throughput caching
+
+- **Elasticsearch**: Multi-node cluster
+  - Data nodes scaled based on index size and query volume
+  - Dedicated master nodes for cluster coordination
+  - Coordinating nodes for query load balancing
+
+### 2.2 Capacity Planning
+
+#### Traffic Estimates
+
+- **Daily Active Users**: 2 million
+- **Peak Concurrent Users**: 200,000
+- **Searches per Day**: 10 million
+- **Bookings per Day**: 100,000
+- **API Requests per Second (Peak)**: 5,000
+
+#### Storage Estimates
+
+- **User Data**: ~1 GB per 10,000 users
+- **Flight Inventory**: ~10 GB daily update volume
+- **Booking Data**: ~100 GB per month
+- **Search Cache**: ~50 GB with 1-hour TTL
+- **Total Storage Growth**: ~3 TB per year
+
+#### Bandwidth Estimates
+
+- **Inbound Traffic**: ~500 Mbps peak
+- **Outbound Traffic**: ~2 Gbps peak
+- **Inter-service Traffic**: ~5 Gbps peak
+- **Database Traffic**: ~1 Gbps peak
+
+### 2.3 Load Balancing Strategy
+
+- **Global Load Balancing**: DNS-based geo-routing
+  - Route users to nearest regional deployment
+  - Failover capability between regions
+  - Health checks for regional availability
+
+- **Service Load Balancing**: Kubernetes Service/Ingress
+  - Layer 7 load balancing
+  - SSL termination
+  - Health checking and graceful degradation
+  - Session affinity where needed
+
+- **Database Load Balancing**: Connection pooling
+  - Write to primary, read from replicas
+  - Prepared statement caching
+  - Connection multiplexing
+
+### 2.4 Caching Strategy
+
+- **Multi-level Caching Architecture**:
+  - Browser/Client Cache: Static assets (1 day TTL)
+  - CDN Cache: Images, static content (1 day TTL)
+  - API Gateway Cache: Responses for non-personalized endpoints (5 min TTL)
+  - Application Cache: User sessions, preferences (30 min TTL)
+  - Database Cache: Query results, reference data (varies)
+
+- **Cache Invalidation Strategies**:
+  - Time-based expiration (TTL)
+  - Event-based invalidation
+  - Version-tagged cache keys
+  - Write-through caching for critical data
+
+- **Cache Warming**:
+  - Pre-warming for predictable traffic spikes
+  - Popular routes and destinations
+  - Trending searches
+
+## 3. Resilience and Fault Tolerance
+
+### 3.1 Failure Domains and Isolation
+
+- **Regional Isolation**:
+  - Independent regional deployments
+  - Cross-region replication for critical data
+  - Regional fallback capabilities
+
+- **Service Isolation**:
+  - Dedicated Kubernetes namespaces
+  - Resource quotas and limits
+  - Independent scaling policies
+
+- **Database Isolation**:
+  - Separate database instances by service domain
+  - Connection pooling with circuit breakers
+  - Read-write splitting
+
+### 3.2 Retry and Circuit Breaker Patterns
+
+- **Retry Strategy**:
+  - Exponential backoff with jitter
+  - Idempotent operation guarantees
+  - Maximum retry limits
+  - Dead letter queues for failed operations
+
+- **Circuit Breaker Implementation**:
+  - Half-open state for recovery testing
+  - Separate breakers for different dependencies
+  - Configurable thresholds and timeouts
+  - Fallback mechanisms
+
+```java
+// Pseudo-code for circuit breaker implementation
+public class AirlineIntegrationService {
+    private final CircuitBreaker circuitBreaker;
+    
+    public AirlineIntegrationService() {
+        this.circuitBreaker = CircuitBreakerFactory.create("airline-integration")
+            .withFailureThreshold(5)
+            .withResetTimeout(Duration.ofSeconds(30))
+            .withFallback(this::getFlightDataFromCache)
+            .build();
+    }
+    
+    public FlightData getFlightData(String flightNumber, LocalDate date) {
+        return circuitBreaker.execute(() -> {
+            return airlineClient.getFlightData(flightNumber, date);
+        });
+    }
+    
+    private FlightData getFlightDataFromCache(String flightNumber, LocalDate date) {
+        // Return cached data or default
+        return cacheService.getFlightData(flightNumber, date)
+            .orElse(new FlightData.builder()
+                    .flightNumber(flightNumber)
+                    .status("UNKNOWN")
+                    .build());
+    }
+}
+```
+
+### 3.3 Distributed Transaction Management
+
+- **Saga Pattern Implementation**:
+  - Choreography-based sagas for booking flow
+  - Compensating transactions for rollback
+  - Event-driven state transitions
+
+```java
+// Pseudo-code for booking saga
+public class BookingSaga {
+    private final EventBus eventBus;
+    private final BookingRepository bookingRepository;
+    
+    // Step 1: Create booking
+    @EventHandler
+    public void handleCreateBookingCommand(CreateBookingCommand cmd) {
+        Booking booking = new Booking(cmd.getUserId(), cmd.getFlightDetails());
+        bookingRepository.save(booking);
+        eventBus.publish(new BookingCreatedEvent(booking.getId()));
+    }
+    
+    // Step 2: Process payment
+    @EventHandler
+    public void handleBookingCreatedEvent(BookingCreatedEvent event) {
+        Booking booking = bookingRepository.findById(event.getBookingId());
+        try {
+            PaymentResult result = paymentService.processPayment(booking);
+            eventBus.publish(new PaymentProcessedEvent(booking.getId(), result.getTransactionId()));
+        } catch (PaymentFailedException e) {
+            eventBus.publish(new PaymentFailedEvent(booking.getId(), e.getReason()));
+        }
+    }
+    
+    // Step 3a: Confirm with airline
+    @EventHandler
+    public void handlePaymentProcessedEvent(PaymentProcessedEvent event) {
+        Booking booking = bookingRepository.findById(event.getBookingId());
+        try {
+            String pnr = airlineService.confirmBooking(booking);
+            booking.setStatus(BookingStatus.CONFIRMED);
+            booking.setPnr(pnr);
+            bookingRepository.save(booking);
+            eventBus.publish(new BookingConfirmedEvent(booking.getId(), pnr));
+        } catch (AirlineException e) {
+            eventBus.publish(new AirlineConfirmationFailedEvent(booking.getId(), e.getReason()));
+        }
+    }
+    
+    // Step 3b: Compensating transaction - refund payment
+    @EventHandler
+    public void handleAirlineConfirmationFailedEvent(AirlineConfirmationFailedEvent event) {
+        Booking booking = bookingRepository.findById(event.getBookingId());
+        paymentService.refundPayment(booking.getPaymentId());
+        booking.setStatus(BookingStatus.FAILED);
+        bookingRepository.save(booking);
+        eventBus.publish(new BookingFailedEvent(booking.getId(), event.getReason()));
+    }
+}
+```
+
+### 3.4 Disaster Recovery Strategy
+
+- **Recovery Time Objective (RTO)**: < 1 hour
+- **Recovery Point Objective (RPO)**: < 5 minutes
+
+- **Backup Strategy**:
+  - Daily full backups
+  - Continuous incremental backups
+  - Cross-region backup replication
+  - Regular restoration testing
+
+- **Failover Procedures**:
+  - Automated primary-replica failover
+  - Cross-region failover for catastrophic failures
+  - DNS-based routing updates
+  - Read-only mode during partial outages
+
+- **Recovery Playbooks**:
+  - Documented step-by-step recovery procedures
+  - Regular disaster recovery drills
+  - Automated recovery scripts
+  - Post-recovery validation tests
+
+## 4. Performance Optimization
+
+### 4.1 Critical Path Optimization
+
+- **Search Path Optimization**:
+  - Caching of popular search results
+  - Asynchronous provider querying
+  - Early termination for slow providers
+  - Progressive result loading
+
+- **Booking Path Optimization**:
+  - Optimistic locking for concurrent booking attempts
+  - Pre-validation of critical booking data
+  - Asynchronous confirmation processes
+  - Prioritized database connections
+
+- **Payment Processing Optimization**:
+  - Parallel payment gateway processing
+  - Idempotent payment operations
+  - Asynchronous receipt generation
+  - Optimistic UI updates
+
+### 4.2 Database Optimization
+
+- **Query Optimization**:
+  - Covering indexes for common queries
+  - Explain plan analysis and tuning
+  - Denormalization for read-heavy tables
+  - Partitioning by date for historical data
+
+- **Connection Management**:
+  - Connection pooling configuration
+  - Statement caching
+  - Transaction isolation level optimization
+  - Timeout handling
+
+- **Scaling Techniques**:
+  - Read replicas for read-heavy workloads
+  - Database sharding for write distribution
+  - Materialized views for complex aggregations
+  - Time-series optimizations for metrics
+
+### 4.3 Network Optimization
+
+- **Content Delivery**:
+  - Global CDN for static assets
+  - Edge caching for frequently accessed content
+  - Image optimization and compression
+  - Progressive loading techniques
+
+- **API Optimization**:
+  - Response compression
+  - Field filtering to reduce payload size
+  - Batching for multiple resource requests
+  - GraphQL for client-specific data requirements
+
+- **Service Communication**:
+  - Binary protocols (gRPC) for inter-service communication
+  - Connection pooling for backend services
+  - Keep-alive connections
+  - Request compression
+
+## 5. Monitoring and Observability
+
+### 5.1 Monitoring Strategy
+
+- **Metrics Collection**:
+  - Infrastructure metrics (CPU, memory, disk, network)
+  - Application metrics (requests, latency, errors, saturation)
+  - Business metrics (searches, bookings, conversions)
+  - Custom metrics for critical flows
+
+- **Logging Strategy**:
+  - Structured JSON logging
+  - Correlation IDs for request tracing
+  - Log levels for different environments
+  - Centralized log aggregation
+
+- **Tracing Strategy**:
+  - Distributed tracing across services
+  - Span collection and visualization
+  - Critical path analysis
+  - Performance bottleneck identification
+
+### 5.2 Alerting Framework
+
+- **SLO-based Alerting**:
+  - Service Level Objectives for key services
+  - Error budget tracking
+  - Proactive alerts before SLO breach
+
+- **Alert Classification**:
+  - P1: Critical - Immediate response required
+  - P2: High - Response within 30 minutes
+  - P3: Medium - Response within 2 hours
+  - P4: Low - Next business day
+
+- **Alert Routing**:
+  - On-call rotation
+  - Escalation policies
+  - Alert grouping to prevent alert fatigue
+  - Context-rich notifications
+
+### 5.3 Dashboards and Visualization
+
+- **Operational Dashboards**:
+  - Service health overview
+  - Error rates and latency
+  - Database performance
+  - Infrastructure utilization
+
+- **Business Dashboards**:
+  - Booking volume and revenue
+  - Search to booking conversion
+  - User engagement metrics
+  - Provider performance comparison
+
+- **Custom Dashboards**:
+  - Team-specific views
+  - Regional performance comparison
+  - Capacity planning projections
+  - A/B test results
+
+## 6. Deployment and CI/CD Pipeline
+
+### 6.1 Deployment Strategy
+
+- **Containerization**:
+  - Docker for application packaging
+  - Multi-stage builds for optimization
+  - Container security scanning
+  - Image versioning strategy
+
+- **Kubernetes Deployment**:
+  - Namespace isolation
+  - Resource requests and limits
+  - Liveness and readiness probes
+  - Pod disruption budgets
+  - Horizontal Pod Autoscaling
+
+- **Deployment Techniques**:
+  - Blue-green deployments for zero downtime
+  - Canary releases for gradual rollout
+  - Feature flags for controlled feature release
+  - Automated rollbacks on failure detection
+
+### 6.2 CI/CD Pipeline
+
+- **Continuous Integration**:
+  - Automated builds on code commit
+  - Unit and integration testing
+  - Code quality checks
+  - Security scanning
+  - Artifact generation
+
+- **Continuous Delivery**:
+  - Automated deployment to dev/staging
+  - Integration testing in staging
+  - Performance testing
+  - Approval gates for production
+
+- **Continuous Deployment**:
+  - Automated production deployment
+  - Smoke testing post-deployment
+  - Gradual traffic shifting
+  - Automated rollback triggers
+
+### 6.3 Environment Strategy
+
+- **Environment Separation**:
+  - Development: For feature development
+  - Testing: For QA and automated tests
+  - Staging: Production-like for final validation
+  - Production: Live environment
+
+- **Configuration Management**:
+  - Environment-specific configurations
+  - Secret management (HashiCorp Vault)
+  - Configuration validation
+  - Immutable infrastructure
+
+## 7. Security Architecture
+
+### 7.1 Security Layers
+
+- **Network Security**:
+  - VPC isolation
+  - Security groups and firewall rules
+  - DDoS protection
+  - Web Application Firewall (WAF)
+
+- **Application Security**:
+  - Input validation and sanitization
+  - Output encoding
+  - CSRF protection
+  - XSS prevention
+  - SQL injection prevention
+
+- **API Security**:
+  - OAuth 2.0 / OpenID Connect
+  - Rate limiting
+  - API key management
+  - JWT validation
+  - Request signing for critical operations
+
+- **Data Security**:
+  - Encryption at rest
+  - Encryption in transit
+  - Field-level encryption for PII
+  - Data masking for non-production
+
+### 7.2 Authentication and Authorization
+
+- **User Authentication**:
+  - Multi-factor authentication
+  - Password policies and hashing
+  - Account lockout protection
+  - Session management
+
+- **Service Authentication**:
+  - mTLS for service-to-service communication
+  - Service account management
+  - Credential rotation
+
+- **Authorization Model**:
+  - Role-based access control (RBAC)
+  - Attribute-based access control (ABAC)
+  - Fine-grained permissions
+  - Principle of least privilege
+
+### 7.3 Compliance and Auditing
+
+- **Compliance Requirements**:
+  - PCI DSS for payment processing
+  - GDPR/CCPA for personal data
+  - SOC2 for service organization controls
+  - Industry-specific travel regulations
+
+- **Audit Logging**:
+  - Security event logging
+  - User activity tracking
+  - Administrative actions logging
+  - Log immutability and tamper protection
+
+## 8. Cost Optimization
+
+### 8.1 Resource Optimization
+
+- **Right-sizing**:
+  - Resource utilization analysis
+  - Automatic scaling based on demand
+  - Reserved instances for predictable workloads
+  - Spot instances for batch processing
+
+- **Storage Optimization**:
+  - Tiered storage strategy
+  - Data lifecycle management
+  - Compression for cold data
+  - Data retention policies
+
+### 8.2 Operational Efficiency
+
+- **Automation**:
+  - Infrastructure as Code (Terraform)
+  - Configuration management (Ansible)
+  - Operational runbooks automation
+  - Self-healing systems
+
+- **Monitoring and Alerting**:
+  - Cost anomaly detection
+  - Resource utilization alerts
+  - Idle resource identification
+  - Cost allocation tagging
+
+### 8.3 Traffic Management
+
+- **CDN Utilization**:
+  - Edge caching for content delivery
+  - Origin shield to reduce backend traffic
+  - Cache optimization for high-hit-rate
+
+- **Data Transfer Optimization**:
+  - Compression for API responses
+  - Regional data locality
+  - Batch operations for bulk data
+  - Incremental data synchronization
+
+## 9. Evolution and Future Enhancements
+
+### 9.1 Architecture Evolution
+
+- **Serverless Components**:
+  - Serverless functions for bursty workloads
+  - Event-driven processing
+  - Pay-per-use model for variable traffic
+
+- **Service Mesh Enhancement**:
+  - Advanced traffic management
+  - Enhanced observability
+  - Mutual TLS everywhere
+  - Policy enforcement
+
+- **Multi-Cloud Strategy**:
+  - Cloud-agnostic architecture
+  - Disaster recovery across cloud providers
+  - Best-of-breed service selection
+
+### 9.2 Technical Debt Management
+
+- **Refactoring Strategy**:
+  - Prioritized technical debt backlog
+  - Regular refactoring sprints
+  - Code quality metrics tracking
+  - Legacy system migration plan
+
+- **Documentation and Knowledge**:
+  - Architecture decision records
+  - System documentation
+  - Knowledge sharing sessions
+  - Onboarding improvements
+
+### 9.3 Innovation Roadmap
+
+- **AI/ML Integration**:
+  - Intelligent pricing recommendations
+  - Fraud detection enhancement
+  - Personalized search rankings
+  - Conversational interfaces
+
+- **Emerging Technologies**:
+  - Blockchain for secure record-keeping
+  - Biometric integration for seamless travel
+  - Extended reality for seat selection
+  - Voice-assisted booking
+
+## 10. Conclusion
+
+The Flight Booking System architecture is designed for global scale, high availability, and optimal performance. By leveraging microservices, event-driven architecture, and modern cloud-native patterns, the system can handle millions of users and bookings while maintaining resilience against failures.
+
+Key architectural decisions include:
+
+1. **Microservices Decomposition**: Enabling independent scaling and evolution of system components
+2. **Multi-Region Deployment**: Ensuring global availability and disaster recovery capabilities
+3. **Polyglot Persistence**: Selecting the right database for each workload
+4. **Event-Driven Communication**: Facilitating loose coupling and asynchronous processing
+5. **Defense in Depth Security**: Protecting user data and ensuring regulatory compliance
+
+This architecture provides a solid foundation for current requirements while allowing for future growth, feature expansion, and technology evolution.

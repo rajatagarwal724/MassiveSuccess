@@ -1,0 +1,332 @@
+# Task Management System Design
+
+## Requirements
+
+### Functional Requirements:
+1. Users should be able to create, update, and delete tasks
+2. Tasks can be assigned to users
+3. Tasks should have priorities, due dates, and status
+4. Users can categorize tasks
+5. Users can add comments to tasks
+6. System should support notifications for task updates
+7. Users can view and filter tasks
+
+### Non-Functional Requirements:
+1. System should be scalable and maintainable
+2. Task operations should be thread-safe
+3. Efficient task filtering and searching
+
+## Core Classes
+
+```java
+import java.time.LocalDateTime;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+
+public class TaskManagementSystem {
+    private final UserManager userManager;
+    private final TaskManager taskManager;
+    private final NotificationService notificationService;
+
+    public TaskManagementSystem() {
+        this.userManager = new UserManager();
+        this.taskManager = new TaskManager();
+        this.notificationService = new NotificationService();
+    }
+
+    // Main system operations
+    public void initialize() {
+        // Initialize system components
+    }
+}
+
+// Entity Classes
+public class User {
+    private final String userId;
+    private String name;
+    private String email;
+    private Set<Task> assignedTasks;
+    private NotificationPreference notificationPreference;
+
+    public User(String userId, String name, String email) {
+        this.userId = userId;
+        this.name = name;
+        this.email = email;
+        this.assignedTasks = new HashSet<>();
+        this.notificationPreference = new NotificationPreference();
+    }
+
+    // Getters and setters
+}
+
+public class Task {
+    private final String taskId;
+    private String title;
+    private String description;
+    private TaskStatus status;
+    private TaskPriority priority;
+    private LocalDateTime dueDate;
+    private User assignee;
+    private User creator;
+    private Category category;
+    private List<Comment> comments;
+    private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
+
+    public Task(String taskId, String title, User creator) {
+        this.taskId = taskId;
+        this.title = title;
+        this.creator = creator;
+        this.status = TaskStatus.TODO;
+        this.priority = TaskPriority.MEDIUM;
+        this.comments = new ArrayList<>();
+        this.createdAt = LocalDateTime.now();
+        this.updatedAt = this.createdAt;
+    }
+
+    public void addComment(Comment comment) {
+        comments.add(comment);
+        this.updatedAt = LocalDateTime.now();
+    }
+
+    // Getters and setters
+}
+
+public class Comment {
+    private final String commentId;
+    private String content;
+    private User author;
+    private LocalDateTime createdAt;
+
+    public Comment(String commentId, String content, User author) {
+        this.commentId = commentId;
+        this.content = content;
+        this.author = author;
+        this.createdAt = LocalDateTime.now();
+    }
+}
+
+public class Category {
+    private final String categoryId;
+    private String name;
+    private String description;
+
+    public Category(String categoryId, String name) {
+        this.categoryId = categoryId;
+        this.name = name;
+    }
+}
+
+// Enums
+public enum TaskStatus {
+    TODO, IN_PROGRESS, IN_REVIEW, DONE
+}
+
+public enum TaskPriority {
+    LOW, MEDIUM, HIGH, URGENT
+}
+
+public enum NotificationType {
+    TASK_ASSIGNED, TASK_UPDATED, COMMENT_ADDED, DUE_DATE_REMINDER
+}
+
+// Manager Classes
+public class TaskManager {
+    private final Map<String, Task> tasks;
+    private final NotificationService notificationService;
+
+    public TaskManager() {
+        this.tasks = new ConcurrentHashMap<>();
+        this.notificationService = new NotificationService();
+    }
+
+    public Task createTask(String title, User creator) {
+        String taskId = generateTaskId();
+        Task task = new Task(taskId, title, creator);
+        tasks.put(taskId, task);
+        return task;
+    }
+
+    public void assignTask(String taskId, User assignee) {
+        Task task = tasks.get(taskId);
+        if (task != null) {
+            task.setAssignee(assignee);
+            notificationService.notify(assignee, NotificationType.TASK_ASSIGNED, task);
+        }
+    }
+
+    public void updateTaskStatus(String taskId, TaskStatus newStatus) {
+        Task task = tasks.get(taskId);
+        if (task != null) {
+            task.setStatus(newStatus);
+            if (task.getAssignee() != null) {
+                notificationService.notify(task.getAssignee(), NotificationType.TASK_UPDATED, task);
+            }
+        }
+    }
+
+    public List<Task> getTasksByUser(User user) {
+        return tasks.values().stream()
+                .filter(task -> user.equals(task.getAssignee()))
+                .toList();
+    }
+
+    public List<Task> getTasksByCategory(Category category) {
+        return tasks.values().stream()
+                .filter(task -> category.equals(task.getCategory()))
+                .toList();
+    }
+
+    private String generateTaskId() {
+        return UUID.randomUUID().toString();
+    }
+}
+
+public class UserManager {
+    private final Map<String, User> users;
+
+    public UserManager() {
+        this.users = new ConcurrentHashMap<>();
+    }
+
+    public User createUser(String name, String email) {
+        String userId = generateUserId();
+        User user = new User(userId, name, email);
+        users.put(userId, user);
+        return user;
+    }
+
+    public Optional<User> getUser(String userId) {
+        return Optional.ofNullable(users.get(userId));
+    }
+
+    private String generateUserId() {
+        return UUID.randomUUID().toString();
+    }
+}
+
+// Notification System
+public class NotificationService {
+    private final Map<User, List<Notification>> notifications;
+
+    public NotificationService() {
+        this.notifications = new ConcurrentHashMap<>();
+    }
+
+    public void notify(User user, NotificationType type, Task task) {
+        Notification notification = new Notification(type, task);
+        notifications.computeIfAbsent(user, k -> new ArrayList<>()).add(notification);
+        sendNotification(user, notification);
+    }
+
+    private void sendNotification(User user, Notification notification) {
+        // Implementation for sending notifications (email, push, etc.)
+        NotificationPreference prefs = user.getNotificationPreference();
+        if (prefs.isEmailEnabled()) {
+            // Send email notification
+        }
+        if (prefs.isPushEnabled()) {
+            // Send push notification
+        }
+    }
+}
+
+public class Notification {
+    private final String notificationId;
+    private final NotificationType type;
+    private final Task task;
+    private final LocalDateTime createdAt;
+    private boolean read;
+
+    public Notification(NotificationType type, Task task) {
+        this.notificationId = UUID.randomUUID().toString();
+        this.type = type;
+        this.task = task;
+        this.createdAt = LocalDateTime.now();
+        this.read = false;
+    }
+}
+
+public class NotificationPreference {
+    private boolean emailEnabled;
+    private boolean pushEnabled;
+    private boolean inAppEnabled;
+
+    public NotificationPreference() {
+        this.emailEnabled = true;
+        this.pushEnabled = true;
+        this.inAppEnabled = true;
+    }
+
+    // Getters and setters
+}
+
+// Example Usage
+class TaskManagementDemo {
+    public static void main(String[] args) {
+        TaskManagementSystem system = new TaskManagementSystem();
+        
+        // Create users
+        UserManager userManager = new UserManager();
+        User john = userManager.createUser("John Doe", "john@example.com");
+        User jane = userManager.createUser("Jane Smith", "jane@example.com");
+
+        // Create and assign task
+        TaskManager taskManager = new TaskManager();
+        Task task = taskManager.createTask("Implement login feature", john);
+        taskManager.assignTask(task.getTaskId(), jane);
+
+        // Update task status
+        taskManager.updateTaskStatus(task.getTaskId(), TaskStatus.IN_PROGRESS);
+
+        // Add comment
+        Comment comment = new Comment(UUID.randomUUID().toString(), 
+            "Started working on the authentication module", jane);
+        task.addComment(comment);
+    }
+}
+```
+
+## Design Patterns Used
+
+1. **Singleton Pattern**: Could be used for TaskManagementSystem if needed
+2. **Observer Pattern**: For notification system
+3. **Factory Pattern**: Could be implemented for creating different types of tasks
+4. **Builder Pattern**: Could be used for complex task creation
+
+## Key Features
+
+1. **Thread Safety**: Using ConcurrentHashMap for thread-safe operations
+2. **Extensible Design**: Easy to add new features and task types
+3. **Notification System**: Flexible notification system with different channels
+4. **SOLID Principles**: Following SOLID principles for maintainable code
+
+## Possible Enhancements
+
+1. Add task search functionality with filters
+2. Implement task dependencies
+3. Add task templates
+4. Add task history tracking
+5. Implement user roles and permissions
+6. Add task analytics and reporting
+7. Implement task archiving
+8. Add support for attachments
+9. Implement recurring tasks
+10. Add task prioritization algorithms
+
+## Data Structures Used
+
+1. ConcurrentHashMap: For thread-safe storage
+2. ArrayList: For comments and notifications
+3. HashSet: For user's assigned tasks
+
+## Time Complexity
+
+- Task Creation: O(1)
+- Task Assignment: O(1)
+- Task Status Update: O(1)
+- Get Tasks by User: O(n)
+- Get Tasks by Category: O(n)
+- Add Comment: O(1)
+
+Where n is the number of tasks in the system.

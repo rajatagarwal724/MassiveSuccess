@@ -1,0 +1,412 @@
+/*
+Throttling Engine for Priority-Based API Requests
+
+Problem Statement:
+Build a throttling engine for a high-traffic API platform where users fall into different priority groups:
+- normal
+- premium
+- VIP
+
+Requirements:
+1. Separate queues per priority group
+2. Global processing limit (max N concurrent requests across all groups)
+3. Fairness using weighted round-robin scheduling
+4. Request simulation with varying durations
+
+Each priority group has a quota for requests per scheduling cycle:
+- normal: 2 requests
+- premium: 3 requests
+- vip: 5 requests
+
+Global max concurrent requests: 10
+*/
+
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Logger;
+
+// Request class representing an API request
+class Request {
+    private final String userId;
+    private final String group;
+    private final String payload;
+    private final long durationMs;
+    private final long arrivalTimeMs;
+
+    public Request(String userId, String group, String payload, long durationMs) {
+        this.userId = userId;
+        this.group = group;
+        this.payload = payload;
+        this.durationMs = durationMs;
+        this.arrivalTimeMs = System.currentTimeMillis();
+    }
+
+    public String getUserId() {
+        return userId;
+    }
+
+    public String getGroup() {
+        return group;
+    }
+
+    public String getPayload() {
+        return payload;
+    }
+
+    public long getDurationMs() {
+        return durationMs;
+    }
+
+    public long getArrivalTimeMs() {
+        return arrivalTimeMs;
+    }
+
+    @Override
+    public String toString() {
+        return "Request{" +
+                "userId='" + userId + '\'' +
+                ", group='" + group + '\'' +
+                ", payload='" + payload + '\'' +
+                ", durationMs=" + durationMs +
+                ", arrivalTimeMs=" + arrivalTimeMs +
+                '}';
+    }
+}
+
+// Priority Group enumeration
+enum PriorityGroup {
+    NORMAL("normal", 2),
+    PREMIUM("premium", 3),
+    VIP("vip", 5);
+
+    private final String name;
+    private final int quota;
+
+    PriorityGroup(String name, int quota) {
+        this.name = name;
+        this.quota = quota;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public int getQuota() {
+        return quota;
+    }
+
+    public static PriorityGroup fromString(String text) {
+        for (PriorityGroup group : PriorityGroup.values()) {
+            if (group.name.equalsIgnoreCase(text)) {
+                return group;
+            }
+        }
+        throw new IllegalArgumentException("Unknown priority group: " + text);
+    }
+}
+
+// RequestQueue class for handling requests of a specific priority group
+class RequestQueue {
+    private final PriorityGroup priorityGroup;
+    private final ConcurrentLinkedQueue<Request> queue;
+    private final Object lock = new Object();
+
+    public RequestQueue(PriorityGroup priorityGroup) {
+        this.priorityGroup = priorityGroup;
+        this.queue = new ConcurrentLinkedQueue<>();
+    }
+
+    public void enqueue(Request request) {
+        queue.offer(request);
+        synchronized (lock) {
+            lock.notifyAll(); // Notify scheduler that a new request is available
+        }
+    }
+
+    public Request dequeue() {
+        return queue.poll();
+    }
+
+    public boolean isEmpty() {
+        return queue.isEmpty();
+    }
+
+    public int size() {
+        return queue.size();
+    }
+
+    public PriorityGroup getPriorityGroup() {
+        return priorityGroup;
+    }
+
+    public Object getLock() {
+        return lock;
+    }
+}
+
+// RequestProcessor class for processing requests
+class RequestProcessor implements Runnable {
+    private static final Logger LOGGER = Logger.getLogger(RequestProcessor.class.getName());
+    private final AtomicInteger activeRequestsCount;
+    private final Request request;
+    private final CountDownLatch latch;
+
+    public RequestProcessor(AtomicInteger activeRequestsCount, Request request, CountDownLatch latch) {
+        this.activeRequestsCount = activeRequestsCount;
+        this.request = request;
+        this.latch = latch;
+    }
+
+    @Override
+    public void run() {
+        try {
+            LOGGER.info("Processing request from user: " + request.getUserId() + ", group: " + request.getGroup());
+            
+            // Simulate processing time
+            Thread.sleep(request.getDurationMs());
+            
+            LOGGER.info("Completed request from user: " + request.getUserId() + ", group: " + request.getGroup() +
+                    ", duration: " + request.getDurationMs() + "ms");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOGGER.warning("Request processing interrupted for user: " + request.getUserId());
+        } finally {
+            activeRequestsCount.decrementAndGet(); // Decrement active request count
+            latch.countDown(); // Signal completion
+        }
+    }
+}
+
+// ThrottlingEngine class that implements the throttling logic
+public class ThrottlingEngine {
+    private static final Logger LOGGER = Logger.getLogger(ThrottlingEngine.class.getName());
+    private final Map<PriorityGroup, RequestQueue> requestQueues;
+    private final ExecutorService executorService;
+    private final int maxConcurrentRequests;
+    private final AtomicInteger activeRequestsCount;
+    private final Thread schedulerThread;
+    private volatile boolean isRunning;
+
+    public ThrottlingEngine(int maxConcurrentRequests, int threadPoolSize) {
+        this.maxConcurrentRequests = maxConcurrentRequests;
+        this.activeRequestsCount = new AtomicInteger(0);
+        this.requestQueues = new EnumMap<>(PriorityGroup.class);
+        this.executorService = Executors.newFixedThreadPool(threadPoolSize);
+        this.isRunning = true;
+
+        // Initialize request queues for each priority group
+        for (PriorityGroup group : PriorityGroup.values()) {
+            requestQueues.put(group, new RequestQueue(group));
+        }
+
+        // Start the scheduler thread
+        this.schedulerThread = new Thread(this::scheduleRequests);
+        this.schedulerThread.setName("ThrottlingEngineScheduler");
+        this.schedulerThread.start();
+    }
+
+    public void submitRequest(Request request) {
+        PriorityGroup group = PriorityGroup.fromString(request.getGroup());
+        RequestQueue queue = requestQueues.get(group);
+        queue.enqueue(request);
+        LOGGER.info("Submitted request from user: " + request.getUserId() + ", group: " + request.getGroup());
+    }
+
+    private void scheduleRequests() {
+        while (isRunning) {
+            // Calculate available slots for processing
+            int availableSlots = maxConcurrentRequests - activeRequestsCount.get();
+            
+            if (availableSlots <= 0) {
+                // No slots available, wait for completion
+                waitForSlots();
+                continue;
+            }
+            
+            // Use a weighted round-robin approach to schedule requests
+            boolean anyRequestProcessed = processRequestsInRoundRobin(availableSlots);
+            
+            if (!anyRequestProcessed) {
+                // If no requests were processed, wait for new requests
+                waitForNewRequests();
+            }
+        }
+    }
+
+    private boolean processRequestsInRoundRobin(int availableSlots) {
+        boolean anyRequestProcessed = false;
+        int remainingSlots = availableSlots;
+
+        // Process VIP requests first (up to quota)
+        int vipProcessed = processRequestsFromQueue(PriorityGroup.VIP, Math.min(remainingSlots, PriorityGroup.VIP.getQuota()));
+        remainingSlots -= vipProcessed;
+        anyRequestProcessed |= (vipProcessed > 0);
+
+        // Process Premium requests next (up to quota)
+        if (remainingSlots > 0) {
+            int premiumProcessed = processRequestsFromQueue(PriorityGroup.PREMIUM, Math.min(remainingSlots, PriorityGroup.PREMIUM.getQuota()));
+            remainingSlots -= premiumProcessed;
+            anyRequestProcessed |= (premiumProcessed > 0);
+        }
+
+        // Process Normal requests last (up to quota)
+        if (remainingSlots > 0) {
+            int normalProcessed = processRequestsFromQueue(PriorityGroup.NORMAL, Math.min(remainingSlots, PriorityGroup.NORMAL.getQuota()));
+            anyRequestProcessed |= (normalProcessed > 0);
+        }
+
+        return anyRequestProcessed;
+    }
+
+    private int processRequestsFromQueue(PriorityGroup group, int maxToProcess) {
+        RequestQueue queue = requestQueues.get(group);
+        int processed = 0;
+
+        for (int i = 0; i < maxToProcess; i++) {
+            if (queue.isEmpty()) {
+                break;
+            }
+
+            Request request = queue.dequeue();
+            if (request != null) {
+                activeRequestsCount.incrementAndGet();
+                executorService.submit(new RequestProcessor(activeRequestsCount, request, new CountDownLatch(1)));
+                processed++;
+            }
+        }
+
+        return processed;
+    }
+
+    private void waitForSlots() {
+        try {
+            Thread.sleep(100); // Short delay before checking again
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void waitForNewRequests() {
+        // Wait on any queue's lock for notification of new requests
+        for (RequestQueue queue : requestQueues.values()) {
+            if (!queue.isEmpty()) {
+                return; // If any queue has requests, don't wait
+            }
+        }
+
+        // All queues are empty, wait on VIP queue's lock
+        try {
+            synchronized (requestQueues.get(PriorityGroup.VIP).getLock()) {
+                requestQueues.get(PriorityGroup.VIP).getLock().wait(500); // Wait with timeout
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    public void shutdown() {
+        isRunning = false;
+        schedulerThread.interrupt();
+        executorService.shutdown();
+        try {
+            if (!executorService.awaitTermination(5, TimeUnit.SECONDS)) {
+                executorService.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            executorService.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    public Map<String, Integer> getQueueStats() {
+        Map<String, Integer> stats = new HashMap<>();
+        requestQueues.forEach((group, queue) -> stats.put(group.getName(), queue.size()));
+        stats.put("activeRequests", activeRequestsCount.get());
+        return stats;
+    }
+
+    // Demo application to test the throttling engine
+    public static void main(String[] args) {
+        // Create a throttling engine with max 10 concurrent requests and a thread pool of 20
+        ThrottlingEngine engine = new ThrottlingEngine(10, 20);
+
+        // Sample requests (matching the scenario in the problem statement)
+        List<Request> sampleRequests = Arrays.asList(
+            new Request("U1", "normal", "do-something", 800),
+            new Request("U2", "vip", "do-something", 1000),
+            new Request("U3", "vip", "do-something", 1200),
+            new Request("U4", "premium", "do-something", 900),
+            new Request("U5", "vip", "do-something", 600),
+            new Request("U6", "normal", "do-something", 1000),
+            new Request("U7", "premium", "do-something", 1100),
+            new Request("U8", "vip", "do-something", 700),
+            new Request("U9", "premium", "do-something", 950),
+            new Request("U10", "vip", "do-something", 800)
+        );
+
+        // Submit requests with small delays to simulate arrival times
+        sampleRequests.forEach(request -> {
+            engine.submitRequest(request);
+            try {
+                Thread.sleep(10); // 10ms delay between requests
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+
+        // Print queue stats every second
+        ScheduledExecutorService statsService = Executors.newSingleThreadScheduledExecutor();
+        statsService.scheduleAtFixedRate(() -> {
+            Map<String, Integer> stats = engine.getQueueStats();
+            System.out.println("Queue Stats: " + stats);
+        }, 0, 1, TimeUnit.SECONDS);
+
+        // Run for 5 seconds, then shutdown
+        try {
+            Thread.sleep(5000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            engine.shutdown();
+            statsService.shutdown();
+        }
+    }
+}
+
+/*
+Key Features and Design Decisions:
+
+1. Priority-based Request Management:
+   - Each priority group (normal, premium, vip) has its own dedicated FIFO queue
+   - Quota enforcement for each group in the scheduling cycle
+
+2. Concurrency Control:
+   - Global limit on concurrent request processing
+   - Thread-safe implementation with AtomicInteger and synchronized blocks
+   - ExecutorService for request processing
+
+3. Scheduling Algorithm:
+   - Weighted round-robin approach that respects quotas
+   - Processes VIP requests first, then premium, then normal
+   - Efficient scheduling to maximize resource utilization
+
+4. Monitoring and Statistics:
+   - Queue size tracking for each priority group
+   - Active request count monitoring
+
+Time Complexity:
+- Request submission: O(1)
+- Request scheduling: O(N) where N is the number of priority groups
+- Queue operations: O(1) using ConcurrentLinkedQueue
+
+Space Complexity:
+- O(M) where M is the total number of queued requests
+
+Potential Enhancements:
+1. Add request timeout handling
+2. Implement dynamic quota adjustment based on load
+3. Add metrics collection for performance analysis
+4. Implement request rejection policy when queues exceed size thresholds
+5. Add support for request priority within the same group
+*/

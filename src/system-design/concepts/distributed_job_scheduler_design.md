@@ -1,0 +1,104 @@
+# System Design: Distributed Job Scheduler
+
+This document outlines the architecture for a highly scalable, resilient, and distributed job scheduler capable of handling millions of daily tasks. The design is based on the principles discussed in the Medium article by Mayil Bayramov.
+
+## 1. Requirements
+
+### 1.1. Functional Requirements
+- **Job Management:** Users can create, delete, and list their scheduled jobs.
+- **Execution History:** Users can view the execution history (e.g., success, failure) for any given job.
+- **Job Types:** The system must support both one-time (run once) and recurring jobs (e.g., run every 3 hours).
+- **Failure Handling:** The system must support a configurable retry mechanism for failed tasks.
+
+### 1.2. Non-Functional Requirements
+- **Scalability:** The system must scale horizontally to handle an average of 50 million task executions per day (~35,000 tasks/minute), with peaks potentially reaching 100,000 tasks/minute.
+- **High Availability:** The system should have no single point of failure. The failure of any single component should not bring down the entire system.
+- **Fault Tolerance:** The system must be resilient to task failures and ensure jobs are not lost.
+- **Performance:** Polling for scheduled jobs must be highly efficient and not degrade under load.
+- **Correctness:** The system must guarantee that a scheduled job is executed exactly once under normal conditions (or at-least-once in failure scenarios, with idempotency handled by the execution logic).
+
+---
+
+## 2. High-Level Architecture
+
+The architecture is composed of four main services decoupled by a message queue and backed by a scalable NoSQL database.
+
+1.  **Job Service (API Layer):** The public-facing service for all user interactions.
+2.  **Scheduling Service (Scheduler):** The core engine responsible for finding jobs due to run.
+3.  **Execution Service (Worker):** The service responsible for running the actual business logic of the tasks.
+4.  **Message Queue (e.g., Kafka):** The asynchronous backbone connecting the Scheduler and the Workers.
+5.  **Database (e.g., Cassandra):** The persistence layer, optimized for high-throughput writes and specific query patterns.
+
+**Data Flow:**
+```
+User -> Job Service -> Database -> Scheduling Service -> Kafka -> Execution Service -> Database
+```
+
+---
+
+## 3. Detailed Component Design
+
+### 3.1. Database Schema (Cassandra)
+
+The schema is denormalized across three tables to optimize for specific, high-frequency read patterns.
+
+#### Table 1: `jobs`
+- **Purpose:** Stores the static configuration of a job.
+- **Schema:**
+  - `user_id` (Partition Key)
+  - `job_id` (Clustering Key)
+  - `execution_interval` (e.g., 'PT3H')
+  - `max_retry_count`
+  - `is_recurring`
+  - `task_payload`
+- **Query Optimization:** Fast retrieval of all jobs for a given user (`WHERE user_id = ?`).
+
+#### Table 2: `task_schedule` (The Core of the Design)
+- **Purpose:** Tracks the next execution time for every pending job. This is the table the scheduler polls.
+- **Schema:**
+  - `next_execution_time` (Composite Partition Key, Unix timestamp with minute precision)
+  - `segment` (Composite Partition Key, integer)
+  - `job_id` (Clustering Key)
+- **Query Optimization:** This is the key insight. By partitioning on time itself, all jobs for a given minute and segment are co-located. A query to fetch work is a highly efficient read of a single partition: `WHERE next_execution_time = ? AND segment = ?`.
+
+#### Table 3: `task_execution_history`
+- **Purpose:** Stores a log of every task execution attempt.
+- **Schema:**
+  - `job_id` (Partition Key)
+  - `execution_time` (Clustering Key, Unix timestamp)
+  - `status` (e.g., SCHEDULED, COMPLETED, FAILED)
+  - `worker_id`
+- **Query Optimization:** Fast retrieval of the entire, chronologically sorted history for a specific job (`WHERE job_id = ?`).
+
+### 3.2. Scheduling Service & The Segmentation Pattern
+
+This service runs in a continuous loop to dispatch jobs.
+
+- **Problem:** Running multiple instances of the scheduler would cause them to query for the same jobs at the same time, leading to duplicate executions (a race condition).
+- **Solution: Coordinated Segmentation**
+    1.  **Segments:** The workload is divided into a fixed number of logical shards called `segments` (e.g., 1-8).
+    2.  **Master/Coordinator:** A master node (e.g., using ZooKeeper for leader election) is responsible for distributing these segments among the active scheduler instances (workers).
+    3.  **Work Distribution:** The master assigns each worker a unique subset of segments. For example, Worker A gets segments [1,2], Worker B gets [3,4], etc.
+    4.  **Eliminating Race Conditions:** Each worker only queries the `task_schedule` table for its assigned segments. Since the segment assignments are disjoint, no two workers will ever retrieve the same job.
+    5.  **Fault Tolerance:** The master periodically heartbeats the workers. If a worker fails, the master reassigns its segments to other healthy workers.
+
+### 3.3. Execution Service & Failure Handling
+
+This service consumes from Kafka and executes the business logic.
+
+- **Decoupling:** The `Execution Service` is completely decoupled from the `Scheduling Service`. It doesn't know or care about schedules; it only processes tasks as they appear on the Kafka topic.
+- **Long-Running Tasks:** This decoupling is critical. The consumer can hand off a long-running task to a separate worker thread pool, allowing the main consumer thread to continue polling Kafka frequently to keep its session alive and avoid timeouts.
+- **Retry Logic:**
+    1.  If a task fails, the worker checks its `max_retry_count`.
+    2.  If retries are available, the task is **not** held or slept on. Instead, it is published to a dedicated `task_retry` topic in Kafka.
+    3.  A separate consumer for the retry topic consumes the message, applies a delay (e.g., by re-scheduling it via the Job Service for a future timestamp), and then re-injects it into the main `task` topic.
+- **Dead Letter Queue (DLQ):** If a task exhausts all its retries, it is moved to a `task_dlq` topic. This prevents a poison pill message from blocking the queue and allows for manual inspection and intervention.
+
+---
+
+## 4. Conclusion
+
+This design provides a robust, scalable, and fault-tolerant solution for distributed job scheduling. The key innovations are:
+
+- **Time-Bucket Partitioning:** Using time itself as the partition key to make polling for jobs a highly efficient, single-partition query.
+- **Coordinated Segmentation:** Using a master node to distribute the workload across scheduler instances, which elegantly solves the race condition problem while enabling horizontal scaling and high availability.

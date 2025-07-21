@@ -1,0 +1,941 @@
+# OpenTable System Design
+
+## 1. Problem Statement
+
+Design a scalable, reliable, and highly available system similar to OpenTable for restaurant reservations. The system should allow users to search for restaurants, check availability, make reservations, and provide/view reviews. Restaurant owners should be able to manage their profiles, availability, and reservations.
+
+## 2. Requirements
+
+### 2.1 Functional Requirements
+
+**For Diners:**
+- Search for restaurants by location, cuisine, price range, and availability
+- View restaurant details, menus, and reviews
+- Make, modify, and cancel reservations
+- Receive confirmation and reminder notifications
+- Write reviews and ratings after dining
+- Maintain a profile with preferences and reservation history
+
+**For Restaurants:**
+- Create and manage restaurant profiles
+- Upload menus, photos, and business information
+- Configure table inventory and time slots
+- Manage reservations (confirm, modify, cancel)
+- View analytics and reports on reservations
+- Respond to customer reviews
+
+### 2.2 Non-Functional Requirements
+
+- **Scalability**: Support millions of users, thousands of restaurants, and millions of daily reservations
+- **Availability**: 99.99% uptime (less than 1 hour downtime per year)
+- **Latency**: 
+  - Search results < 200ms at P95
+  - Reservation creation < 500ms at P95
+- **Consistency**: Eventually consistent for search results, strongly consistent for reservations
+- **Durability**: Zero data loss for confirmed reservations
+- **Security**: Secure payment processing, data encryption, and access control
+
+### 2.3 Extended Requirements
+
+- Waitlist management for fully booked restaurants
+- Points-based loyalty program
+- Integration with third-party platforms (Google, Yelp, TripAdvisor)
+- Table management for restaurants (assigning specific tables to reservations)
+- Support for special events and large group bookings
+
+## 3. System Design Overview
+
+### 3.1 High-Level Architecture
+
+The OpenTable system will use a microservices architecture with the following major components:
+
+1. **Client Applications**
+   - Web application
+   - Mobile applications (iOS/Android)
+   - Restaurant management portal
+
+2. **API Gateway Layer**
+   - Request routing and load balancing
+   - Authentication and authorization
+   - Rate limiting and throttling
+
+3. **Core Services**
+   - User Service
+   - Restaurant Service
+   - Reservation Service
+   - Search Service
+   - Review Service
+   - Notification Service
+   - Analytics Service
+   - Payment Service
+
+4. **Data Storage Layer**
+   - Relational databases for transactional data
+   - NoSQL databases for scalable data (reviews, logs)
+   - Search indexes for restaurant discovery
+   - Cache layer for frequently accessed data
+
+5. **Background Processing**
+   - Asynchronous job processing
+   - Scheduled tasks (reminders, data aggregation)
+
+6. **Infrastructure**
+   - Multi-region deployment
+   - Content Delivery Network (CDN)
+   - Monitoring and alerting
+
+## 4. Detailed Component Design
+
+### 4.1 User Service
+
+**Responsibilities:**
+- User registration and authentication
+- Profile management
+- Preference tracking
+- Reservation history
+
+**Data Model:**
+```
+User {
+  user_id: UUID (PK)
+  email: String (unique)
+  phone_number: String
+  password_hash: String
+  first_name: String
+  last_name: String
+  created_at: Timestamp
+  last_login: Timestamp
+  preferences: JSON
+  status: Enum [ACTIVE, INACTIVE, SUSPENDED]
+}
+
+UserAddress {
+  address_id: UUID (PK)
+  user_id: UUID (FK)
+  address_line1: String
+  address_line2: String
+  city: String
+  state: String
+  postal_code: String
+  country: String
+  is_default: Boolean
+}
+
+UserPayment {
+  payment_id: UUID (PK)
+  user_id: UUID (FK)
+  payment_type: Enum [CREDIT_CARD, PAYPAL, etc.]
+  token: String (tokenized payment info)
+  is_default: Boolean
+  expiry_date: Date
+}
+```
+
+**APIs:**
+- `POST /users` - Create user
+- `GET /users/{id}` - Get user profile
+- `PUT /users/{id}` - Update user profile
+- `POST /auth/login` - User login
+- `POST /auth/logout` - User logout
+- `GET /users/{id}/reservations` - Get user's reservation history
+- `GET /users/{id}/favorites` - Get user's favorite restaurants
+
+**Scaling Strategy:**
+- Horizontal scaling with stateless service instances
+- User data sharded by user_id
+- Caching frequently accessed user profiles
+
+### 4.2 Restaurant Service
+
+**Responsibilities:**
+- Restaurant registration and profile management
+- Menu and photo management
+- Table inventory configuration
+- Business hours and special closures
+
+**Data Model:**
+```
+Restaurant {
+  restaurant_id: UUID (PK)
+  name: String
+  description: Text
+  cuisine_types: Array<String>
+  price_range: Enum [1,2,3,4] ($ to $$$$)
+  phone_number: String
+  website: String
+  created_at: Timestamp
+  updated_at: Timestamp
+  status: Enum [ACTIVE, INACTIVE, PENDING]
+  features: Array<String> (e.g., "outdoor seating", "parking")
+  policies: JSON
+}
+
+Address {
+  address_id: UUID (PK)
+  restaurant_id: UUID (FK)
+  address_line1: String
+  address_line2: String
+  city: String
+  state: String
+  postal_code: String
+  country: String
+  latitude: Float
+  longitude: Float
+}
+
+BusinessHours {
+  id: UUID (PK)
+  restaurant_id: UUID (FK)
+  day_of_week: Integer (0-6)
+  opening_time: Time
+  closing_time: Time
+  is_closed: Boolean
+}
+
+SpecialHours {
+  id: UUID (PK)
+  restaurant_id: UUID (FK)
+  date: Date
+  opening_time: Time
+  closing_time: Time
+  is_closed: Boolean
+  reason: String
+}
+
+Menu {
+  menu_id: UUID (PK)
+  restaurant_id: UUID (FK)
+  name: String
+  description: String
+  start_date: Date
+  end_date: Date
+  is_active: Boolean
+}
+
+MenuItem {
+  item_id: UUID (PK)
+  menu_id: UUID (FK)
+  name: String
+  description: Text
+  price: Decimal
+  category: String
+  dietary_flags: Array<String> (e.g., "vegetarian", "gluten-free")
+  image_url: String
+}
+
+Table {
+  table_id: UUID (PK)
+  restaurant_id: UUID (FK)
+  name: String
+  capacity: Integer
+  minimum_capacity: Integer
+  table_type: String
+  is_active: Boolean
+}
+```
+
+**APIs:**
+- `POST /restaurants` - Create restaurant
+- `GET /restaurants/{id}` - Get restaurant details
+- `PUT /restaurants/{id}` - Update restaurant
+- `GET /restaurants/{id}/menus` - Get restaurant menus
+- `POST /restaurants/{id}/menus` - Add menu
+- `PUT /restaurants/{id}/hours` - Update business hours
+- `POST /restaurants/{id}/tables` - Add tables
+- `GET /restaurants/{id}/tables` - Get table inventory
+
+**Scaling Strategy:**
+- Geo-partitioning of restaurant data by location
+- Caching restaurant details and menus
+- Read replicas for high-traffic regions
+
+### 4.3 Reservation Service
+
+**Responsibilities:**
+- Checking table availability
+- Creating, modifying, and canceling reservations
+- Managing reservation status changes
+- Handling special requests
+
+**Data Model:**
+```
+Reservation {
+  reservation_id: UUID (PK)
+  restaurant_id: UUID (FK)
+  user_id: UUID (FK)
+  party_size: Integer
+  reservation_date: Date
+  reservation_time: Time
+  duration_minutes: Integer (default based on restaurant policy)
+  status: Enum [PENDING, CONFIRMED, SEATED, COMPLETED, CANCELLED, NO_SHOW]
+  created_at: Timestamp
+  updated_at: Timestamp
+  special_requests: Text
+  cancellation_reason: Text
+  source: Enum [WEB, MOBILE, API, PHONE]
+}
+
+TableAssignment {
+  assignment_id: UUID (PK)
+  reservation_id: UUID (FK)
+  table_id: UUID (FK)
+  assigned_at: Timestamp
+}
+
+AvailabilityCache {
+  restaurant_id: UUID
+  date: Date
+  time_slot: Time
+  available_seats: Integer
+  last_updated: Timestamp
+}
+```
+
+**APIs:**
+- `GET /restaurants/{id}/availability` - Check availability for date/time/party size
+- `POST /reservations` - Create reservation
+- `GET /reservations/{id}` - Get reservation details
+- `PUT /reservations/{id}` - Update reservation
+- `DELETE /reservations/{id}` - Cancel reservation
+- `PUT /reservations/{id}/status` - Update reservation status
+- `POST /reservations/{id}/tables` - Assign tables
+
+**Key Algorithms:**
+- **Availability Checking Algorithm**:
+  1. Check restaurant capacity for time slot
+  2. Check existing reservations for the time slot
+  3. Consider reservations that overlap with the requested time
+  4. Calculate available seats based on configured tables
+  5. Consider restaurant-specific booking rules and constraints
+
+**Consistency and Concurrency:**
+- Optimistic concurrency control for availability
+- Distributed locking for reservation creation
+- Two-phase commit for critical reservation operations
+
+**Scaling Strategy:**
+- Sharding by restaurant_id and date
+- Pre-computed availability cache
+- Time-based partitioning of historical reservation data
+
+### 4.4 Search Service
+
+**Responsibilities:**
+- Restaurant discovery and search
+- Filtering by various criteria
+- Geospatial queries
+- Relevance ranking
+
+**Data Model:**
+```
+RestaurantSearchDocument {
+  restaurant_id: UUID
+  name: String
+  cuisine_types: Array<String>
+  price_range: Integer
+  rating: Float
+  location: GeoPoint
+  neighborhood: String
+  city: String
+  state: String
+  country: String
+  features: Array<String>
+  available_times: Array<DateTime> (for specific search date)
+  popularity_score: Float
+}
+```
+
+**Search Index Structure:**
+- Inverted index for text search
+- Geospatial index for location-based queries
+- B-tree indexes for range queries (price, rating)
+
+**APIs:**
+- `GET /search/restaurants` - Search with multiple parameters
+- `GET /search/autocomplete` - Autocomplete for restaurant or cuisine
+- `GET /restaurants/popular` - Get popular restaurants by location
+
+**Search Parameters:**
+- Location (coordinates or address)
+- Date and time
+- Party size
+- Cuisine type
+- Price range
+- Special features
+- Availability (has open tables)
+
+**Ranking Factors:**
+- Relevance to search terms
+- Distance from specified location
+- Availability at requested time
+- Rating and review count
+- Popularity (reservation volume)
+
+**Scaling Strategy:**
+- Dedicated search service using Elasticsearch or similar
+- Search index replicas for read scaling
+- Incremental indexing for updates
+- Geo-sharding for location-based optimization
+
+### 4.5 Review Service
+
+**Responsibilities:**
+- Collecting and storing user reviews
+- Calculating and updating restaurant ratings
+- Filtering inappropriate content
+- Aggregating review statistics
+
+**Data Model:**
+```
+Review {
+  review_id: UUID (PK)
+  restaurant_id: UUID (FK)
+  user_id: UUID (FK)
+  reservation_id: UUID (FK, optional)
+  rating: Integer (1-5)
+  review_text: Text
+  visit_date: Date
+  created_at: Timestamp
+  updated_at: Timestamp
+  status: Enum [PENDING, PUBLISHED, FLAGGED, REMOVED]
+  helpful_votes: Integer
+}
+
+ReviewResponse {
+  response_id: UUID (PK)
+  review_id: UUID (FK)
+  responder_id: UUID (FK to restaurant staff)
+  response_text: Text
+  created_at: Timestamp
+  updated_at: Timestamp
+}
+
+RestaurantRating {
+  restaurant_id: UUID (PK)
+  average_rating: Float
+  rating_count: Integer
+  rating_distribution: Array<Integer> (count of 1-5 star ratings)
+  last_updated: Timestamp
+}
+```
+
+**APIs:**
+- `POST /restaurants/{id}/reviews` - Create review
+- `GET /restaurants/{id}/reviews` - Get restaurant reviews
+- `PUT /reviews/{id}` - Update review
+- `POST /reviews/{id}/responses` - Respond to review
+- `GET /restaurants/{id}/ratings` - Get aggregate ratings
+
+**Content Moderation:**
+- Automated filtering for inappropriate content
+- Manual review queue for flagged content
+- Abuse detection algorithms
+
+**Scaling Strategy:**
+- NoSQL storage for reviews (high write, low update)
+- Caching of aggregate ratings
+- Asynchronous processing of rating updates
+
+### 4.6 Notification Service
+
+**Responsibilities:**
+- Sending reservation confirmations
+- Sending reminders and updates
+- Supporting multiple notification channels
+- Managing notification preferences
+
+**Data Model:**
+```
+Notification {
+  notification_id: UUID (PK)
+  user_id: UUID (FK)
+  type: Enum [CONFIRMATION, REMINDER, CANCELLATION, REVIEW_REQUEST, etc.]
+  content: JSON
+  status: Enum [PENDING, SENT, FAILED, DELIVERED, READ]
+  created_at: Timestamp
+  scheduled_for: Timestamp
+  sent_at: Timestamp
+}
+
+NotificationPreference {
+  user_id: UUID (PK)
+  notification_type: String (PK)
+  email_enabled: Boolean
+  sms_enabled: Boolean
+  push_enabled: Boolean
+}
+
+NotificationTemplate {
+  template_id: UUID (PK)
+  notification_type: String
+  language: String
+  subject: String
+  body_template: Text
+  variables: Array<String>
+}
+```
+
+**Notification Channels:**
+- Email (via SMTP or third-party service)
+- SMS (via Twilio or similar)
+- Push notifications (iOS/Android)
+- In-app notifications
+
+**APIs:**
+- `POST /notifications` - Create notification
+- `GET /users/{id}/notifications` - Get user notifications
+- `PUT /users/{id}/notification-preferences` - Update preferences
+
+**Scaling Strategy:**
+- Queue-based architecture for handling notification spikes
+- Prioritization of critical notifications
+- Batching of non-time-sensitive notifications
+
+### 4.7 Analytics Service
+
+**Responsibilities:**
+- Collecting and processing system events
+- Generating restaurant analytics
+- Providing business intelligence
+- Supporting data-driven features
+
+**Data Model:**
+```
+ReservationAnalytics {
+  restaurant_id: UUID
+  date: Date
+  total_reservations: Integer
+  completed_reservations: Integer
+  cancelled_reservations: Integer
+  no_shows: Integer
+  average_party_size: Float
+  revenue_estimate: Decimal
+  peak_hour: Integer
+}
+
+UserAnalytics {
+  user_id: UUID
+  lifetime_reservations: Integer
+  cancellation_rate: Float
+  average_party_size: Float
+  favorite_cuisines: Array<String>
+  preferred_price_range: Integer
+  preferred_locations: Array<String>
+}
+
+SearchAnalytics {
+  date: Date
+  search_term: String
+  location: String
+  result_count: Integer
+  conversion_rate: Float
+  top_clicked_restaurants: Array<UUID>
+}
+```
+
+**Event Tracking:**
+- Reservation lifecycle events
+- User search and browsing behavior
+- Review submission and interaction
+- Restaurant profile views and clicks
+
+**APIs:**
+- `GET /analytics/restaurants/{id}/summary` - Get restaurant analytics
+- `GET /analytics/restaurants/{id}/trends` - Get reservation trends
+- `POST /events` - Record analytics event
+
+**Data Processing Pipeline:**
+- Real-time event streaming
+- Batch processing for complex analytics
+- Data warehousing for historical analysis
+
+### 4.8 Payment Service
+
+**Responsibilities:**
+- Processing reservation deposits
+- Handling cancellation fees
+- Managing restaurant billing and subscriptions
+- Processing refunds
+
+**Data Model:**
+```
+Payment {
+  payment_id: UUID (PK)
+  reservation_id: UUID (FK)
+  user_id: UUID (FK)
+  amount: Decimal
+  currency: String
+  status: Enum [PENDING, AUTHORIZED, CAPTURED, FAILED, REFUNDED]
+  payment_method_id: UUID
+  transaction_id: String
+  created_at: Timestamp
+  updated_at: Timestamp
+}
+
+RestaurantSubscription {
+  subscription_id: UUID (PK)
+  restaurant_id: UUID (FK)
+  plan_id: String
+  status: Enum [ACTIVE, PAST_DUE, CANCELLED]
+  billing_cycle: Enum [MONTHLY, ANNUAL]
+  next_billing_date: Date
+  payment_method_id: UUID
+}
+```
+
+**Payment Flow:**
+1. Authorization at reservation time (optional)
+2. Capture on reservation completion or no-show
+3. Refund processing for eligible cancellations
+
+**APIs:**
+- `POST /payments` - Create payment
+- `GET /payments/{id}` - Get payment details
+- `POST /payments/{id}/refund` - Process refund
+- `GET /restaurants/{id}/subscription` - Get subscription details
+
+**Security Considerations:**
+- PCI compliance for payment processing
+- Tokenization of payment information
+- Fraud detection algorithms
+
+## 5. Data Storage Design
+
+### 5.1 Database Selection
+
+**Primary Databases:**
+- **PostgreSQL**: For transactional data (users, restaurants, reservations)
+  - Supports complex joins and transactions
+  - Offers geospatial extensions for location data
+  - Strong consistency guarantees
+
+- **MongoDB/DynamoDB**: For semi-structured data (reviews, analytics)
+  - Horizontal scaling for high write volumes
+  - Flexible schema for evolving data models
+  - Efficient document storage for reviews/content
+
+- **Elasticsearch**: For search functionality
+  - Inverted index for text search
+  - Geospatial indexing for location-based search
+  - Relevance scoring and filtering
+
+- **Redis**: For caching and rate limiting
+  - Availability cache for fast reservation checks
+  - Session management
+  - Rate limiting counters
+  - Pub/Sub for notifications
+
+### 5.2 Data Partitioning
+
+**Sharding Strategies:**
+
+1. **User data**: Shard by user_id
+   - Even distribution of user traffic
+   - Local transactions within a shard
+
+2. **Restaurant data**: Geo-sharding by region/city
+   - Localizes queries to specific regions
+   - Improves query performance for location-based searches
+
+3. **Reservation data**: Compound sharding by (restaurant_id, date)
+   - Collocates reservations for same restaurant and date
+   - Optimizes availability checking
+
+4. **Review data**: Shard by restaurant_id
+   - Keeps all reviews for a restaurant together
+   - Efficient aggregation of ratings
+
+### 5.3 Caching Strategy
+
+**Multi-Level Caching:**
+
+1. **Application Cache (Local):**
+   - Static data (restaurant policies, business hours)
+   - User session data
+   - Rate limiting counters
+
+2. **Distributed Cache (Redis):**
+   - Restaurant availability cache
+   - Popular restaurant profiles
+   - Active user profiles
+   - Search results for common queries
+
+3. **CDN Caching:**
+   - Restaurant images and static assets
+   - Restaurant menus
+   - Public restaurant profiles
+
+**Cache Invalidation Strategies:**
+- Time-based expiration for availability data
+- Event-based invalidation for restaurant profile updates
+- Write-through caching for critical reservation data
+
+## 6. API Design
+
+### 6.1 API Gateway
+
+**Responsibilities:**
+- Request routing to appropriate microservices
+- Authentication and authorization
+- Rate limiting and throttling
+- Request/response transformation
+- API versioning
+- CORS handling
+- Logging and monitoring
+
+### 6.2 API Standards
+
+- RESTful API design principles
+- JSON as primary data format
+- OAuth 2.0 for authentication
+- JWT for stateless authorization
+- Consistent error handling
+- Pagination for list endpoints
+- Field filtering and sparse fieldsets
+- API versioning in URL path
+
+### 6.3 API Documentation
+
+- OpenAPI/Swagger specification
+- Interactive API documentation
+- Code samples and SDKs
+- Rate limit documentation
+- Webhook documentation
+
+## 7. Scalability and Performance
+
+### 7.1 Horizontal Scaling
+
+- Stateless microservices for easy scaling
+- Database read replicas for query scaling
+- Database sharding for write scaling
+- Search service replication
+
+### 7.2 Caching Layers
+
+- Browser caching for static assets
+- CDN for global content delivery
+- API response caching
+- Database query result caching
+- Computed availability caching
+
+### 7.3 Performance Optimizations
+
+- Asynchronous processing for non-critical operations
+- Database indexing strategies
+- Query optimization and monitoring
+- Connection pooling
+- Batching of database operations
+- Data denormalization for read performance
+
+### 7.4 Load Balancing
+
+- Layer 7 load balancing for API traffic
+- Consistent hashing for cache distribution
+- Geo-routing based on user location
+- Health checks and automatic failover
+
+## 8. Availability and Reliability
+
+### 8.1 Multi-Region Deployment
+
+- Active-active deployment across regions
+- Global traffic routing based on latency and availability
+- Cross-region data replication
+- Regional isolation for failures
+
+### 8.2 Disaster Recovery
+
+- Regular automated backups
+- Point-in-time recovery
+- Cross-region replication
+- Recovery time objective (RTO) < 1 hour
+- Recovery point objective (RPO) < 5 minutes
+
+### 8.3 Fault Tolerance
+
+- Service redundancy
+- Database replication
+- Circuit breakers for external dependencies
+- Graceful degradation strategies
+- Retry mechanisms with exponential backoff
+
+### 8.4 Monitoring and Alerting
+
+- Service health metrics
+- End-to-end latency monitoring
+- Error rate tracking
+- Database performance monitoring
+- Synthetic transaction monitoring
+- Anomaly detection
+- SLO-based alerting
+
+## 9. Security
+
+### 9.1 Authentication and Authorization
+
+- Multi-factor authentication for users and restaurants
+- Role-based access control
+- OAuth 2.0 and JWT for API authentication
+- Session management and token validation
+- IP-based access restrictions for restaurant management
+
+### 9.2 Data Security
+
+- Encryption at rest for sensitive data
+- Encryption in transit (TLS 1.3)
+- PCI compliance for payment processing
+- Tokenization of payment information
+- Data anonymization for analytics
+
+### 9.3 API Security
+
+- Rate limiting to prevent abuse
+- Input validation and sanitization
+- Protection against common attacks (SQL injection, XSS, CSRF)
+- API key rotation policies
+- Request signing for critical operations
+
+### 9.4 Compliance
+
+- GDPR compliance for user data
+- CCPA compliance
+- Data retention policies
+- Audit logging for sensitive operations
+- Privacy policy and terms of service
+
+## 10. System Implementation
+
+### 10.1 Technology Stack
+
+**Backend:**
+- Programming Languages: Java/Kotlin, Go
+- Frameworks: Spring Boot, Gin
+- Database: PostgreSQL, MongoDB
+- Caching: Redis
+- Search: Elasticsearch
+- Message Queue: Kafka
+- API Gateway: Kong/AWS API Gateway
+
+**Frontend:**
+- Web: React.js, Next.js
+- Mobile: React Native, Swift (iOS), Kotlin (Android)
+- State Management: Redux
+- UI Components: Material-UI
+
+**DevOps:**
+- Containerization: Docker
+- Orchestration: Kubernetes
+- CI/CD: Jenkins, GitHub Actions
+- Infrastructure as Code: Terraform
+- Monitoring: Prometheus, Grafana, Datadog
+- Logging: ELK Stack
+
+### 10.2 Development and Deployment Pipeline
+
+- Microservice code repositories
+- Feature branches and pull requests
+- Automated testing (unit, integration, e2e)
+- Continuous integration
+- Canary deployments
+- Blue-green deployments
+- Automated rollbacks
+
+## 11. System Evolution and Scalability Roadmap
+
+### 11.1 Phase 1: MVP
+
+- Core reservation functionality
+- Basic restaurant profiles
+- Simple search capabilities
+- Email notifications
+- Web and mobile applications
+
+### 11.2 Phase 2: Enhanced Features
+
+- Advanced search and filtering
+- Review system
+- Waitlist management
+- Multiple notification channels
+- Restaurant analytics dashboard
+
+### 11.3 Phase 3: Scale and Optimize
+
+- Geo-distributed deployment
+- Advanced caching strategies
+- Search optimization
+- Personalization features
+- Advanced analytics
+
+### 11.4 Phase 4: Ecosystem Expansion
+
+- Third-party integrations
+- Restaurant POS integration
+- Loyalty program
+- Special event management
+- API platform for partners
+
+## 12. Monitoring and Operations
+
+### 12.1 Key Metrics
+
+**System Health:**
+- Service availability
+- Error rates by service
+- API latency percentiles
+- Database performance
+- Cache hit rates
+
+**Business Metrics:**
+- Reservation volume
+- Conversion rate (search to reservation)
+- Cancellation rate
+- User acquisition and retention
+- Restaurant onboarding rate
+
+### 12.2 Logging Strategy
+
+- Structured logging format (JSON)
+- Correlation IDs for request tracing
+- Log aggregation and centralized storage
+- Log retention policies
+- Log-based alerting
+
+### 12.3 Alerting and On-Call
+
+- SLO-based alerting
+- Severity levels and escalation policies
+- On-call rotation
+- Incident management process
+- Post-mortem analysis
+
+## 13. Trade-offs and Limitations
+
+### 13.1 Design Trade-offs
+
+- **Consistency vs. Availability**: Choosing eventual consistency for search results to improve availability and performance, while maintaining strong consistency for reservation operations.
+
+- **Complexity vs. Performance**: Introducing caching layers and pre-computation increases system complexity but significantly improves performance for critical paths.
+
+- **Coupling vs. Independence**: Some services have dependencies on others, creating coupling but enabling important features that require cross-service data.
+
+### 13.2 Known Limitations
+
+- Real-time availability updates during high-traffic periods may experience slight delays.
+- Search results may not reflect very recent restaurant changes due to indexing delay.
+- Geo-distributed deployments introduce complexity in data consistency and replication.
+
+## 14. Conclusion
+
+The proposed OpenTable system design provides a scalable, reliable, and feature-rich platform for restaurant reservations. By leveraging microservices architecture, distributed data storage, and caching strategies, the system can handle millions of users and reservations while maintaining high availability and performance.
+
+Key strengths of this design include:
+
+1. Scalable microservices architecture that allows independent scaling of components
+2. Multi-region deployment for global availability and disaster recovery
+3. Sophisticated reservation algorithm that balances restaurant policies with user experience
+4. Comprehensive search capabilities with relevance ranking
+5. Real-time notifications across multiple channels
+6. Robust analytics for both users and restaurants
+
+This design addresses the core requirements while providing a foundation for future growth and feature expansion.

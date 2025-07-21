@@ -1,0 +1,703 @@
+-- Ticketmaster/BookMyShow Database Schema (Relational, RDBMS)
+-- Covers: Event, Venue, Ticket, Booking, Performer, User, Seat, Payment, Category, ShowTime, Pricing, etc.
+
+-- ================================
+-- USERS
+-- ================================
+CREATE TABLE Users (
+    user_id         BIGINT PRIMARY KEY AUTO_INCREMENT,
+    name            VARCHAR(100) NOT NULL,
+    email           VARCHAR(100) UNIQUE NOT NULL,
+    phone           VARCHAR(20),
+    password_hash   VARCHAR(255) NOT NULL,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+-- ================================
+-- VENUES
+-- ================================
+CREATE TABLE Venues (
+    venue_id        BIGINT PRIMARY KEY AUTO_INCREMENT,
+    name            VARCHAR(150) NOT NULL,
+    address         VARCHAR(255) NOT NULL,
+    city            VARCHAR(100) NOT NULL,
+    state           VARCHAR(100),
+    country         VARCHAR(100),
+    postal_code     VARCHAR(20),
+    capacity        INT NOT NULL,
+    geo_lat         DECIMAL(10,7),
+    geo_long        DECIMAL(10,7),
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ================================
+-- SCREENS (Within a Venue, e.g., Cinema Screens)
+-- ================================
+CREATE TABLE Screens (
+    screen_id           BIGINT PRIMARY KEY AUTO_INCREMENT,
+    venue_id            BIGINT NOT NULL,
+    screen_name_number  VARCHAR(50) NOT NULL, -- e.g., "Screen 1", "Audi A"
+    seating_capacity    INT,
+    supported_formats   JSON, -- Store as JSON array, e.g., ["2D", "3D", "IMAX", "Dolby Atmos"]
+    created_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (venue_id) REFERENCES Venues(venue_id),
+    UNIQUE (venue_id, screen_name_number)
+);
+
+-- ================================
+-- PERFORMERS
+-- ================================
+CREATE TABLE Performers (
+    performer_id    BIGINT PRIMARY KEY AUTO_INCREMENT,
+    name            VARCHAR(100) NOT NULL,
+    bio             TEXT,
+    type            VARCHAR(50), -- singer, band, comedian, etc.
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ================================
+-- EVENTS
+-- ================================
+CREATE TABLE Events (
+    event_id        BIGINT PRIMARY KEY AUTO_INCREMENT,
+    name            VARCHAR(150) NOT NULL,
+    description     TEXT,
+    category_id     BIGINT,
+    venue_id        BIGINT NOT NULL,
+    start_date      DATE NOT NULL,
+    end_date        DATE,
+    status          VARCHAR(20) NOT NULL, -- scheduled, cancelled, postponed, etc.
+    event_type      VARCHAR(50) COMMENT 'e.g., movie, concert, play, sports, standup_comedy',
+    movie_language  VARCHAR(50) COMMENT 'Applicable if event_type is movie',
+    movie_format    VARCHAR(50) COMMENT 'e.g., 2D, 3D, IMAX; Applicable if event_type is movie',
+    censor_rating   VARCHAR(20) COMMENT 'e.g., U, U/A, A; Applicable if event_type is movie',
+    duration_minutes INT COMMENT 'Applicable if event_type is movie or similar timed event',
+    image_url       VARCHAR(255),
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (venue_id) REFERENCES Venues(venue_id),
+    FOREIGN KEY (category_id) REFERENCES Categories(category_id)
+);
+
+-- ================================
+-- EVENT_PERFORMERS (Many-to-Many)
+-- ================================
+CREATE TABLE EventPerformers (
+    event_id        BIGINT NOT NULL,
+    performer_id    BIGINT NOT NULL,
+    PRIMARY KEY (event_id, performer_id),
+    FOREIGN KEY (event_id) REFERENCES Events(event_id),
+    FOREIGN KEY (performer_id) REFERENCES Performers(performer_id)
+);
+
+-- ================================
+-- CATEGORIES
+-- ================================
+CREATE TABLE Categories (
+    category_id     BIGINT PRIMARY KEY AUTO_INCREMENT,
+    name            VARCHAR(100) NOT NULL,
+    description     TEXT
+);
+
+-- ================================
+-- SHOWTIMES (Multiple shows per event)
+-- ================================
+CREATE TABLE ShowTimes (
+    showtime_id     BIGINT PRIMARY KEY AUTO_INCREMENT,
+    event_id        BIGINT NOT NULL,
+    screen_id       BIGINT NOT NULL,
+    start_time      DATETIME NOT NULL,
+    end_time        DATETIME,
+    FOREIGN KEY (event_id) REFERENCES Events(event_id),
+    FOREIGN KEY (screen_id) REFERENCES Screens(screen_id)
+);
+
+-- ================================
+-- SEATS (Venue seat map)
+-- ================================
+CREATE TABLE Seats (
+    seat_id         BIGINT PRIMARY KEY AUTO_INCREMENT,
+    screen_id       BIGINT NOT NULL,
+    seat_number     VARCHAR(20) NOT NULL,
+    section         VARCHAR(50),
+    row             VARCHAR(20),
+    seat_type       VARCHAR(50), -- VIP, Regular, Balcony, etc.
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (screen_id) REFERENCES Screens(screen_id)
+);
+
+-- ================================
+-- TICKETS (Issued per showtime, per seat)
+-- ================================
+CREATE TABLE Tickets (
+    ticket_id       BIGINT PRIMARY KEY AUTO_INCREMENT,
+    showtime_id     BIGINT NOT NULL,
+    seat_id         BIGINT NOT NULL,
+    price_id        BIGINT NOT NULL,
+    status          VARCHAR(20) NOT NULL, -- available, reserved, sold, cancelled
+    issued_at       DATETIME,
+    FOREIGN KEY (showtime_id) REFERENCES ShowTimes(showtime_id),
+    FOREIGN KEY (seat_id) REFERENCES Seats(seat_id),
+    FOREIGN KEY (price_id) REFERENCES Pricing(price_id)
+);
+
+-- ================================
+-- PRICING (Dynamic pricing per showtime, seat type)
+-- ================================
+CREATE TABLE Pricing (
+    price_id        BIGINT PRIMARY KEY AUTO_INCREMENT,
+    showtime_id     BIGINT NOT NULL,
+    seat_type       VARCHAR(50) NOT NULL,
+    price           DECIMAL(10,2) NOT NULL,
+    currency        VARCHAR(10) NOT NULL,
+    valid_from      DATETIME NOT NULL,
+    valid_to        DATETIME,
+    FOREIGN KEY (showtime_id) REFERENCES ShowTimes(showtime_id)
+);
+
+-- ================================
+-- BOOKINGS (User purchases)
+-- ================================
+CREATE TABLE Bookings (
+    booking_id      BIGINT PRIMARY KEY AUTO_INCREMENT,
+    user_id         BIGINT NOT NULL,
+    showtime_id     BIGINT NOT NULL,
+    booking_time    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    status          VARCHAR(20) NOT NULL, -- pending, confirmed, cancelled, expired
+    total_amount    DECIMAL(10,2) NOT NULL,
+    payment_id      BIGINT,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id),
+    FOREIGN KEY (showtime_id) REFERENCES ShowTimes(showtime_id),
+    FOREIGN KEY (payment_id) REFERENCES Payments(payment_id)
+);
+
+-- ================================
+-- BOOKING_TICKETS (Many-to-Many: Booking <-> Tickets)
+-- ================================
+CREATE TABLE BookingTickets (
+    booking_id      BIGINT NOT NULL,
+    ticket_id       BIGINT NOT NULL,
+    PRIMARY KEY (booking_id, ticket_id),
+    FOREIGN KEY (booking_id) REFERENCES Bookings(booking_id),
+    FOREIGN KEY (ticket_id) REFERENCES Tickets(ticket_id)
+);
+
+-- ================================
+-- PAYMENTS
+-- ================================
+CREATE TABLE Payments (
+    payment_id      BIGINT PRIMARY KEY AUTO_INCREMENT,
+    user_id         BIGINT NOT NULL,
+    amount          DECIMAL(10,2) NOT NULL,
+    currency        VARCHAR(10) NOT NULL,
+    status          VARCHAR(20) NOT NULL, -- pending, completed, failed, refunded
+    payment_method  VARCHAR(50), -- card, UPI, wallet, etc.
+    transaction_id  VARCHAR(100),
+    payment_time    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id)
+);
+
+-- ================================
+-- FOOD & BEVERAGES (F&B)
+-- ================================
+CREATE TABLE FoodItems (
+    food_item_id    BIGINT PRIMARY KEY AUTO_INCREMENT,
+    venue_id        BIGINT NOT NULL, -- Or screen_id if F&B is screen-specific, or link to a general F&B provider for the venue
+    name            VARCHAR(100) NOT NULL,
+    description     TEXT,
+    price           DECIMAL(10,2) NOT NULL,
+    category        VARCHAR(50), -- e.g., Popcorn, Beverages, Combo, Merchandise
+    image_url       VARCHAR(255),
+    is_available    BOOLEAN DEFAULT TRUE,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (venue_id) REFERENCES Venues(venue_id)
+);
+
+-- ================================
+-- BOOKING_FOOD_ITEMS (Many-to-Many: Booking <-> FoodItems)
+-- ================================
+CREATE TABLE BookingFoodItems (
+    booking_food_item_id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    booking_id      BIGINT NOT NULL,
+    food_item_id    BIGINT NOT NULL,
+    quantity        INT NOT NULL,
+    price_per_item  DECIMAL(10,2) NOT NULL, -- Price per item at the time of booking
+    total_price     DECIMAL(10,2) NOT NULL, -- Stored calculated value: quantity * price_per_item
+    FOREIGN KEY (booking_id) REFERENCES Bookings(booking_id),
+    FOREIGN KEY (food_item_id) REFERENCES FoodItems(food_item_id),
+    UNIQUE (booking_id, food_item_id) -- Ensures one entry per distinct food item in a booking; quantity handles multiples
+);
+
+-- ================================
+-- OFFERS & PROMOTIONS
+-- ================================
+CREATE TABLE Offers (
+    offer_id        BIGINT PRIMARY KEY AUTO_INCREMENT,
+    offer_code      VARCHAR(50) UNIQUE, -- e.g., "SAVE20", "BMSFIRST"
+    name            VARCHAR(100) NOT NULL,
+    description     TEXT,
+    discount_type   VARCHAR(20) NOT NULL, -- e.g., PERCENTAGE, FIXED_AMOUNT
+    discount_value  DECIMAL(10,2) NOT NULL,
+    max_discount_amount DECIMAL(10,2) COMMENT 'Max discount applicable for percentage type',
+    min_booking_value DECIMAL(10,2) COMMENT 'Minimum booking value to avail the offer',
+    valid_from      DATETIME NOT NULL,
+    valid_to        DATETIME NOT NULL,
+    usage_limit_per_user INT DEFAULT 1,
+    total_usage_limit INT,
+    applicable_event_types JSON COMMENT 'JSON array of event_types this offer applies to, null for all',
+    applicable_categories JSON COMMENT 'JSON array of category_ids this offer applies to, null for all',
+    terms_conditions TEXT,
+    is_active       BOOLEAN DEFAULT TRUE,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+-- ================================
+-- BOOKING_OFFERS (Applying an offer to a booking)
+-- ================================
+CREATE TABLE BookingOffers (
+    booking_offer_id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    booking_id      BIGINT NOT NULL,
+    offer_id        BIGINT NOT NULL,
+    discount_applied DECIMAL(10,2) NOT NULL,
+    FOREIGN KEY (booking_id) REFERENCES Bookings(booking_id),
+    FOREIGN KEY (offer_id) REFERENCES Offers(offer_id),
+    UNIQUE (booking_id, offer_id) -- Typically one offer, or one instance of a specific offer type per booking
+);
+
+-- ================================
+-- REVIEWS & RATINGS
+-- ================================
+CREATE TABLE Reviews (
+    review_id       BIGINT PRIMARY KEY AUTO_INCREMENT,
+    user_id         BIGINT NOT NULL,
+    event_id        BIGINT NOT NULL, -- Or movie_id if a separate Movies table exists
+    rating          TINYINT NOT NULL, -- e.g., 1 to 5 or 1 to 10
+    title           VARCHAR(150),
+    comment         TEXT,
+    review_date     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    is_approved     BOOLEAN DEFAULT TRUE COMMENT 'For moderation purposes',
+    FOREIGN KEY (user_id) REFERENCES Users(user_id),
+    FOREIGN KEY (event_id) REFERENCES Events(event_id),
+    CHECK (rating >= 1 AND rating <= 5) -- Example check constraint, adjust as needed
+);
+
+-- ================================
+-- AUDIT & EXTENSIONS
+-- ================================
+-- Add tables for Offers, Coupons, Reviews, Notifications, etc. as needed.
+
+-- ================================
+-- INDEXING & PERFORMANCE
+-- ================================
+-- Add appropriate indexes on foreign keys, (event_id, showtime_id), (venue_id, seat_type), etc.
+-- Use partitioning for very large tables (e.g., Tickets, Bookings) by event or date.
+-- For high-concurrency, consider row-level locking or optimistic concurrency control on Tickets.
+
+-- ================================
+-- NOTES
+-- ================================
+-- 1. This schema supports reserved seating and dynamic pricing.
+-- 2. For general admission, omit Seats and link Tickets directly to ShowTimes.
+-- 3. For NoSQL (DynamoDB) modeling, denormalize: use composite keys and store booking/ticket subdocuments.
+-- 4. Add fields for audit, soft delete, and multi-tenancy as needed.
+
+-- Core entities
+CREATE TABLE Users (user_id, name, email, phone, ...)
+CREATE TABLE Venues (venue_id, name, address, type [EVENT/CINEMA], ...)
+CREATE TABLE Events (event_id, name, venue_id, type [CONCERT/SPORT/MOVIE], ...)
+CREATE TABLE Movies (movie_id, title, duration, release_date, language, rating, ...)
+CREATE TABLE Cinemas (cinema_id, venue_id, ...)
+CREATE TABLE Screens (screen_id, cinema_id, screen_number, capacity, screen_type, ...)
+CREATE TABLE ShowTimes (showtime_id, event_id, movie_id, screen_id, start_time, ...)
+
+-- Seating and tickets
+CREATE TABLE Seats (seat_id, venue_id, screen_id, section, row, number, type, ...)
+CREATE TABLE Tickets (ticket_id, showtime_id, seat_id, price, status, ...)
+
+-- Bookings and payments
+CREATE TABLE Bookings (booking_id, user_id, showtime_id, status, ...)
+CREATE TABLE Payments (payment_id, booking_id, amount, status, ...)
+
+-- Movie-specific entities
+CREATE TABLE MovieGenres (movie_id, genre_id, ...)
+CREATE TABLE Actors (actor_id, name, ...)
+CREATE TABLE MovieCast (movie_id, actor_id, role, ...)
+
+
+-- BookMyShow Database Schema (Relational, RDBMS)
+-- Focused on Movies, Events, Cinemas, Showtimes, Bookings, F&B, Offers, and Reviews.
+
+-- ================================
+-- CITIES
+-- ================================
+CREATE TABLE Cities (
+    city_id         INT PRIMARY KEY AUTO_INCREMENT,
+    name            VARCHAR(100) NOT NULL UNIQUE,
+    state           VARCHAR(100),
+    country         VARCHAR(100) DEFAULT 'India',
+    is_active       BOOLEAN DEFAULT TRUE,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+-- ================================
+-- USERS
+-- ================================
+CREATE TABLE Users (
+    user_id         BIGINT PRIMARY KEY AUTO_INCREMENT,
+    name            VARCHAR(100) NOT NULL,
+    email           VARCHAR(100) UNIQUE NOT NULL,
+    phone           VARCHAR(20) UNIQUE,
+    password_hash   VARCHAR(255) NOT NULL,
+    preferred_city_id INT,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (preferred_city_id) REFERENCES Cities(city_id)
+);
+
+-- ================================
+-- VENUES (Cinemas, Theatres, Event Grounds)
+-- ================================
+CREATE TABLE Venues (
+    venue_id        BIGINT PRIMARY KEY AUTO_INCREMENT,
+    name            VARCHAR(150) NOT NULL,
+    address         VARCHAR(255) NOT NULL,
+    city_id         INT NOT NULL,
+    latitude        DECIMAL(10,7),
+    longitude       DECIMAL(10,7),
+    type            VARCHAR(50) NOT NULL COMMENT 'e.g., Cinema, Theatre, Stadium, Auditorium',
+    amenities       JSON COMMENT 'e.g., ["Parking", "F&B Counter", "Wheelchair Accessible"]',
+    is_active       BOOLEAN DEFAULT TRUE,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (city_id) REFERENCES Cities(city_id)
+);
+
+-- ================================
+-- SCREENS (Within a Venue, e.g., Cinema Screens)
+-- ================================
+CREATE TABLE Screens (
+    screen_id           BIGINT PRIMARY KEY AUTO_INCREMENT,
+    venue_id            BIGINT NOT NULL,
+    name                VARCHAR(50) NOT NULL COMMENT 'e.g., "Screen 1", "Audi A"',
+    total_seats         INT NOT NULL,
+    supported_formats   JSON COMMENT 'e.g., ["2D", "3D", "IMAX", "Dolby Atmos"]',
+    created_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (venue_id) REFERENCES Venues(venue_id),
+    UNIQUE (venue_id, name)
+);
+
+-- ================================
+-- SEAT_TYPES
+-- ================================
+CREATE TABLE SeatTypes (
+    seat_type_id    INT PRIMARY KEY AUTO_INCREMENT,
+    name            VARCHAR(50) NOT NULL UNIQUE COMMENT 'e.g., Regular, VIP, Recliner, Balcony',
+    description     TEXT
+);
+
+-- ================================
+-- SEATS (Layout per screen)
+-- ================================
+CREATE TABLE Seats (
+    seat_id         BIGINT PRIMARY KEY AUTO_INCREMENT,
+    screen_id       BIGINT NOT NULL,
+    seat_type_id    INT NOT NULL,
+    row_identifier  VARCHAR(10) NOT NULL COMMENT 'e.g., A, B, AA',
+    seat_number     VARCHAR(10) NOT NULL COMMENT 'e.g., 1, 2, 101',
+    is_aisle        BOOLEAN DEFAULT FALSE,
+    is_accessible   BOOLEAN DEFAULT FALSE COMMENT 'Wheelchair accessible',
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (screen_id) REFERENCES Screens(screen_id),
+    FOREIGN KEY (seat_type_id) REFERENCES SeatTypes(seat_type_id),
+    UNIQUE (screen_id, row_identifier, seat_number)
+);
+
+-- ================================
+-- GENRES
+-- ================================
+CREATE TABLE Genres (
+    genre_id        INT PRIMARY KEY AUTO_INCREMENT,
+    name            VARCHAR(50) NOT NULL UNIQUE
+);
+
+-- ================================
+-- LANGUAGES
+-- ================================
+CREATE TABLE Languages (
+    language_id     INT PRIMARY KEY AUTO_INCREMENT,
+    name            VARCHAR(50) NOT NULL UNIQUE
+);
+
+-- ================================
+-- CAST_CREW_MEMBERS
+-- ================================
+CREATE TABLE CastCrewMembers (
+    member_id       BIGINT PRIMARY KEY AUTO_INCREMENT,
+    name            VARCHAR(150) NOT NULL,
+    bio             TEXT,
+    image_url       VARCHAR(255)
+);
+
+-- ================================
+-- MOVIES
+-- ================================
+CREATE TABLE Movies (
+    movie_id        BIGINT PRIMARY KEY AUTO_INCREMENT,
+    title           VARCHAR(200) NOT NULL,
+    description     TEXT,
+    release_date    DATE,
+    duration_minutes INT,
+    censor_rating   VARCHAR(20) COMMENT 'e.g., U, U/A, A',
+    poster_url      VARCHAR(255),
+    trailer_url     VARCHAR(255),
+    overall_rating  DECIMAL(3,1) DEFAULT 0.0,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+-- ================================
+-- MOVIE_GENRES (Many-to-Many)
+-- ================================
+CREATE TABLE MovieGenres (
+    movie_id        BIGINT NOT NULL,
+    genre_id        INT NOT NULL,
+    PRIMARY KEY (movie_id, genre_id),
+    FOREIGN KEY (movie_id) REFERENCES Movies(movie_id) ON DELETE CASCADE,
+    FOREIGN KEY (genre_id) REFERENCES Genres(genre_id) ON DELETE CASCADE
+);
+
+-- ================================
+-- MOVIE_LANGUAGES (Many-to-Many)
+-- ================================
+CREATE TABLE MovieLanguages (
+    movie_id        BIGINT NOT NULL,
+    language_id     INT NOT NULL,
+    PRIMARY KEY (movie_id, language_id),
+    FOREIGN KEY (movie_id) REFERENCES Movies(movie_id) ON DELETE CASCADE,
+    FOREIGN KEY (language_id) REFERENCES Languages(language_id) ON DELETE CASCADE
+);
+
+-- ================================
+-- MOVIE_CAST (Many-to-Many with roles)
+-- ================================
+CREATE TABLE MovieCast (
+    movie_id        BIGINT NOT NULL,
+    member_id       BIGINT NOT NULL,
+    role            VARCHAR(100) NOT NULL COMMENT 'e.g., Actor, Director, Music Director, Cinematographer',
+    character_name  VARCHAR(100) COMMENT 'If role is Actor',
+    PRIMARY KEY (movie_id, member_id, role),
+    FOREIGN KEY (movie_id) REFERENCES Movies(movie_id) ON DELETE CASCADE,
+    FOREIGN KEY (member_id) REFERENCES CastCrewMembers(member_id) ON DELETE CASCADE
+);
+
+-- ================================
+-- EVENTS (Non-movie events like Concerts, Plays, Sports)
+-- ================================
+CREATE TABLE Events (
+    event_id        BIGINT PRIMARY KEY AUTO_INCREMENT,
+    title           VARCHAR(200) NOT NULL,
+    description     TEXT,
+    event_type      VARCHAR(50) NOT NULL COMMENT 'e.g., Concert, Play, Sports, Standup Comedy',
+    start_datetime  DATETIME NOT NULL,
+    end_datetime    DATETIME,
+    venue_id        BIGINT NOT NULL,
+    poster_url      VARCHAR(255),
+    overall_rating  DECIMAL(3,1) DEFAULT 0.0,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (venue_id) REFERENCES Venues(venue_id)
+);
+-- Note: Events can also have genres, languages, performers (similar to MovieGenres, MovieLanguages, MovieCast)
+-- For brevity, these linking tables (EventGenres, EventLanguages, EventPerformers) are omitted but follow the same pattern.
+
+-- ================================
+-- SHOWTIMES
+-- ================================
+CREATE TABLE Showtimes (
+    showtime_id     BIGINT PRIMARY KEY AUTO_INCREMENT,
+    movie_id        BIGINT COMMENT 'Null if it is an Event showtime',
+    event_id        BIGINT COMMENT 'Null if it is a Movie showtime',
+    screen_id       BIGINT NOT NULL,
+    start_datetime  DATETIME NOT NULL,
+    end_datetime    DATETIME NOT NULL,
+    is_active       BOOLEAN DEFAULT TRUE,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (movie_id) REFERENCES Movies(movie_id),
+    FOREIGN KEY (event_id) REFERENCES Events(event_id),
+    FOREIGN KEY (screen_id) REFERENCES Screens(screen_id),
+    CHECK ((movie_id IS NOT NULL AND event_id IS NULL) OR (movie_id IS NULL AND event_id IS NOT NULL))
+);
+
+-- ================================
+-- PRICING (Per showtime, per seat type)
+-- ================================
+CREATE TABLE Pricing (
+    pricing_id      BIGINT PRIMARY KEY AUTO_INCREMENT,
+    showtime_id     BIGINT NOT NULL,
+    seat_type_id    INT NOT NULL,
+    price           DECIMAL(10,2) NOT NULL,
+    currency        VARCHAR(10) DEFAULT 'INR',
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (showtime_id) REFERENCES Showtimes(showtime_id) ON DELETE CASCADE,
+    FOREIGN KEY (seat_type_id) REFERENCES SeatTypes(seat_type_id),
+    UNIQUE (showtime_id, seat_type_id)
+);
+
+-- ================================
+-- BOOKINGS
+-- ================================
+CREATE TABLE Bookings (
+    booking_id      VARCHAR(50) PRIMARY KEY COMMENT 'Unique alphanumeric booking ID, not auto-increment',
+    user_id         BIGINT NOT NULL,
+    showtime_id     BIGINT NOT NULL,
+    booking_datetime DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    total_amount    DECIMAL(10,2) NOT NULL,
+    convenience_fee DECIMAL(8,2) DEFAULT 0.00,
+    discount_amount DECIMAL(10,2) DEFAULT 0.00,
+    final_amount    DECIMAL(10,2) NOT NULL,
+    status          VARCHAR(20) NOT NULL COMMENT 'e.g., PENDING, CONFIRMED, CANCELLED, FAILED, EXPIRED',
+    payment_id      VARCHAR(100) UNIQUE,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id),
+    FOREIGN KEY (showtime_id) REFERENCES Showtimes(showtime_id)
+);
+
+-- ================================
+-- BOOKING_SEATS (Tickets within a booking)
+-- ================================
+CREATE TABLE BookingSeats (
+    booking_seat_id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    booking_id      VARCHAR(50) NOT NULL,
+    seat_id         BIGINT NOT NULL,
+    price           DECIMAL(10,2) NOT NULL COMMENT 'Price of this specific seat at time of booking',
+    FOREIGN KEY (booking_id) REFERENCES Bookings(booking_id) ON DELETE CASCADE,
+    FOREIGN KEY (seat_id) REFERENCES Seats(seat_id),
+    UNIQUE (booking_id, seat_id)
+    -- The constraint UNIQUE (showtime_id, seat_id) to prevent double booking of a seat for a showtime
+    -- is best enforced by application logic or a trigger that checks `Seats.status` or a dedicated `ShowtimeSeatStatus` table.
+    -- For simplicity in DDL, this direct constraint is omitted here.
+);
+
+-- ================================
+-- PAYMENTS
+-- ================================
+CREATE TABLE Payments (
+    payment_id      VARCHAR(100) PRIMARY KEY COMMENT 'Transaction ID from payment gateway',
+    booking_id      VARCHAR(50) NOT NULL UNIQUE,
+    amount          DECIMAL(10,2) NOT NULL,
+    currency        VARCHAR(10) DEFAULT 'INR',
+    method          VARCHAR(50) COMMENT 'e.g., CARD, UPI, WALLET',
+    gateway_response JSON,
+    status          VARCHAR(20) NOT NULL COMMENT 'e.g., PENDING, SUCCESS, FAILED, REFUNDED',
+    payment_datetime DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (booking_id) REFERENCES Bookings(booking_id)
+);
+
+-- ================================
+-- FOOD_ITEMS
+-- ================================
+CREATE TABLE FoodItems (
+    food_item_id    BIGINT PRIMARY KEY AUTO_INCREMENT,
+    venue_id        BIGINT NOT NULL,
+    name            VARCHAR(100) NOT NULL,
+    description     TEXT,
+    price           DECIMAL(8,2) NOT NULL,
+    category        VARCHAR(50) COMMENT 'e.g., Popcorn, Beverages, Combo',
+    image_url       VARCHAR(255),
+    is_available    BOOLEAN DEFAULT TRUE,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (venue_id) REFERENCES Venues(venue_id)
+);
+
+-- ================================
+-- BOOKING_FOOD_ITEMS (Many-to-Many)
+-- ================================
+CREATE TABLE BookingFoodItems (
+    booking_food_item_id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    booking_id      VARCHAR(50) NOT NULL,
+    food_item_id    BIGINT NOT NULL,
+    quantity        INT NOT NULL,
+    price_per_item  DECIMAL(8,2) NOT NULL COMMENT 'Price at time of booking',
+    total_price     DECIMAL(10,2) NOT NULL,
+    FOREIGN KEY (booking_id) REFERENCES Bookings(booking_id) ON DELETE CASCADE,
+    FOREIGN KEY (food_item_id) REFERENCES FoodItems(food_item_id)
+);
+
+-- ================================
+-- OFFERS
+-- ================================
+CREATE TABLE Offers (
+    offer_id        BIGINT PRIMARY KEY AUTO_INCREMENT,
+    offer_code      VARCHAR(50) UNIQUE,
+    name            VARCHAR(100) NOT NULL,
+    description     TEXT,
+    discount_type   VARCHAR(20) NOT NULL COMMENT 'PERCENTAGE, FIXED_AMOUNT',
+    discount_value  DECIMAL(10,2) NOT NULL,
+    max_discount    DECIMAL(10,2) COMMENT 'For percentage type',
+    min_booking_value DECIMAL(10,2),
+    valid_from      DATETIME NOT NULL,
+    valid_to        DATETIME NOT NULL,
+    is_active       BOOLEAN DEFAULT TRUE,
+    terms_conditions TEXT,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+-- ================================
+-- APPLIED_OFFERS (Linking offers to bookings)
+-- ================================
+CREATE TABLE AppliedOffers (
+    applied_offer_id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    booking_id      VARCHAR(50) NOT NULL,
+    offer_id        BIGINT NOT NULL,
+    discount_availed DECIMAL(10,2) NOT NULL,
+    FOREIGN KEY (booking_id) REFERENCES Bookings(booking_id) ON DELETE CASCADE,
+    FOREIGN KEY (offer_id) REFERENCES Offers(offer_id),
+    UNIQUE (booking_id, offer_id)
+);
+
+-- ================================
+-- REVIEWS
+-- ================================
+CREATE TABLE Reviews (
+    review_id       BIGINT PRIMARY KEY AUTO_INCREMENT,
+    user_id         BIGINT NOT NULL,
+    movie_id        BIGINT COMMENT 'Null if event review',
+    event_id        BIGINT COMMENT 'Null if event review',
+    rating          TINYINT NOT NULL COMMENT 'e.g., 1 to 5 or 1 to 10',
+    title           VARCHAR(150),
+    comment         TEXT,
+    review_datetime DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    is_approved     BOOLEAN DEFAULT TRUE,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id),
+    FOREIGN KEY (movie_id) REFERENCES Movies(movie_id) ON DELETE SET NULL,
+    FOREIGN KEY (event_id) REFERENCES Events(event_id) ON DELETE SET NULL,
+    CHECK (rating >= 1 AND rating <= 5), -- Adjust rating scale as needed
+    CHECK ((movie_id IS NOT NULL AND event_id IS NULL) OR (movie_id IS NULL AND event_id IS NOT NULL))
+);
+
+-- ================================
+-- INDEXING RECOMMENDATIONS
+-- ================================
+-- Add indexes on all foreign keys.
+-- Add composite indexes for common query patterns, e.g.:
+--   (city_id, type) on Venues
+--   (venue_id, name) on Screens
+--   (screen_id, start_datetime) on Showtimes for seat availability checks and listings
+--   (movie_id, start_datetime) on Showtimes
+--   (event_id, start_datetime) on Showtimes
+--   (user_id, booking_datetime) on Bookings
+--   (title) on Movies for search
+--   (name) on Genres, Languages for lookups
+
+-- Consider partitioning large tables like Bookings, BookingSeats, Payments by date or booking_id range.

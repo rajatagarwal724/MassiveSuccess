@@ -1,0 +1,208 @@
+# Top K Heavy Hitters System Design - Kappa Architecture
+
+**Version:** 1.0
+**Last Updated:** 2025-06-01
+
+## 1. Introduction and System Overview
+
+### 1.1. Problem Definition
+
+The Top K Heavy Hitters problem involves identifying the K most frequently occurring items in a continuous, high-volume data stream. In this design, we focus specifically on a Kappa Architecture implementation that provides eventually consistent results.
+
+Kappa Architecture differs from Lambda Architecture by processing all data through a single path (streaming) rather than maintaining separate batch and speed layers. This simplifies operations, reduces code duplication, and allows for uniform processing semantics.
+
+### 1.2. Core Principles
+
+1. **Stream-First:** All data is treated as a stream of immutable events
+2. **Single Processing Path:** One code path for all data processing
+3. **Replayability:** Ability to reprocess data by replaying the event log
+4. **Eventual Consistency:** Results converge to accuracy over time
+5. **Stateful Processing:** Maintains state for windowed and global counts
+
+### 1.3. Business Use Cases
+
+- **E-Commerce:** Track most viewed/purchased products in real-time
+- **Content Delivery:** Identify most requested resources for caching
+- **Network Security:** Detect potential DDoS sources by IP address frequency
+- **Social Media:** Find trending topics and hashtags
+- **Advertising:** Track most clicked ads for optimization
+
+### 1.4. Key System Requirements
+
+**Functional Requirements:**
+- Process billions of events per day
+- Support configurable K values (10-1000 typically)
+- Provide frequency estimates with defined error bounds
+- Support time-windowed analysis (last hour, day, week)
+- Enable multi-dimensional analysis (by category, region, etc.)
+
+**Non-Functional Requirements:**
+- Process events with sub-second latency
+- Provide results with eventual consistency (minutes)
+- Scale horizontally to handle increasing loads
+- Recover from failures without data loss
+- Minimize resource usage while maintaining accuracy
+
+## 2. Kappa Architecture Components
+
+### 2.1. High-Level Architecture
+
+```
++----------------+     +----------------+     +-------------------+     +----------------+
+| Data Sources   | --> | Event Stream   | --> | Stream Processing | --> | State Store    |
+| (Applications, |     | (Kafka)        |     | (Flink)           |     | (Redis/RocksDB)|
+|  Sensors, etc.)|     +----------------+     +-------------------+     +----------------+
++----------------+                                                             |
+                                                                              v
+                                        +----------------+          +----------------+
+                                        | Applications   | <------> | Query Service  |
+                                        | (Dashboards,   |          | (REST API)     |
+                                        |  Monitoring)   |          +----------------+
+                                        +----------------+
+```
+
+### 2.2. Component Details
+
+#### 2.2.1. Data Sources
+
+Systems generating events of interest for heavy hitter analysis:
+
+- Web servers generating HTTP request logs
+- Mobile applications reporting user interactions
+- IoT devices sending telemetry data
+- E-commerce platforms logging product views/purchases
+- Content delivery networks tracking resource requests
+
+Each data source sends events to the Event Stream system using standardized event formats.
+
+#### 2.2.2. Event Stream (Apache Kafka)
+
+The event stream layer serves as the central nervous system of the Kappa Architecture:
+
+**Key Features:**
+- **Persistence:** Stores events with configurable retention (e.g., 7 days)
+- **Scalability:** Handles millions of events per second through partitioning
+- **Durability:** Replicates data for fault tolerance
+- **Ordering:** Maintains event order within partitions
+
+**Configuration:**
+- Multiple topics based on event types or domains
+- Partitioning by item ID or natural key for parallelism
+- Replication factor of 3 for fault tolerance
+- Compression enabled (Snappy) for efficiency
+
+#### 2.2.3. Stream Processing (Apache Flink)
+
+The stream processing layer implements the heavy hitters algorithms:
+
+**Key Components:**
+- **Event Parser:** Extracts relevant items from raw events
+- **Sketch Manager:** Maintains probabilistic data structures (Count-Min Sketch)
+- **Window Operator:** Defines time windows for analysis
+- **State Manager:** Handles persistent state and checkpointing
+- **Result Publisher:** Outputs updated heavy hitters lists
+
+**Processing Strategy:**
+- Parallel processing across multiple nodes
+- Stateful operations for maintaining counts
+- Periodic checkpointing for fault tolerance
+- Watermarking for handling late events
+
+#### 2.2.4. State Store
+
+The state store maintains both the internal state of sketches and the output results:
+
+**For Sketch State:**
+- **RocksDB:** Embedded state backend in Flink
+- **S3/HDFS:** For checkpoint storage and recovery
+
+**For Query Results:**
+- **Redis:** For fast access to recent results
+- **Cassandra:** For historical results and persistence
+
+#### 2.2.5. Query Service
+
+Provides access to heavy hitter results through standardized APIs:
+
+**Features:**
+- RESTful API for querying current top K
+- Parameter support for K value, time window, and dimensions
+- Result metadata including consistency information
+- Caching for frequent queries
+- Authentication and rate limiting
+
+### 2.3. Data Flow
+
+1. **Event Generation:** Data sources produce events containing items to be counted
+2. **Event Ingestion:** Events are published to Kafka topics
+3. **Stream Processing:**
+   a. Flink jobs consume events from Kafka
+   b. Items are extracted and processed by Count-Min Sketch and Space-Saving algorithms
+   c. Stateful aggregation tracks frequencies across time windows
+4. **State Management:**
+   a. Persistent state is maintained in RocksDB
+   b. Checkpoints are stored in durable storage
+   c. Top K results are published to the result store
+5. **Query Handling:**
+   a. Query service receives requests for top K items
+   b. Results are fetched from state store
+   c. Response includes items, frequencies, and consistency metadata
+
+## 3. System Capabilities and Limitations
+
+### 3.1. Capabilities
+
+- **Horizontal Scalability:** Add processing nodes as data volume increases
+- **Fault Tolerance:** Recover from node failures with minimal data loss
+- **Flexible Windowing:** Support for sliding, tumbling, and session windows
+- **Multi-dimensional Analysis:** Segment heavy hitters by various dimensions
+- **Approximate Results:** Trading perfect accuracy for efficiency
+- **Eventually Consistent:** Results converge to accuracy over time
+
+### 3.2. Limitations
+
+- **Not Strongly Consistent:** Results may lag behind actual data
+- **Approximate Counts:** Frequency estimates have error bounds
+- **Resource Intensive:** Maintaining state for high-cardinality data requires significant resources
+- **Cold Start:** Initial results after system restart may have higher error rates
+- **Window Limitations:** Very long windows increase state size and processing costs
+
+### 3.3. Scale and Performance Characteristics
+
+- **Event Processing Throughput:** Millions of events per second
+- **Result Latency:** 1-5 minutes for eventual consistency
+- **Query Response Time:** < 100ms for cached results, < 1s for computed results
+- **Error Bounds:** Configurable based on sketch parameters (typically 0.1-1%)
+- **Storage Requirements:** Depends on cardinality and window size
+  - ~100MB per sketch for millions of unique items
+  - ~10GB for historical results (7 days with hourly windows)
+
+## 4. Implementation Strategy
+
+### 4.1. Phase 1: Core Infrastructure
+
+- Set up Kafka cluster with appropriate topics and partitioning
+- Implement basic Flink job with Count-Min Sketch
+- Establish state management with RocksDB
+- Create simple query API for current top K
+
+### 4.2. Phase 2: Enhanced Functionality
+
+- Add windowing support for different time periods
+- Implement multi-dimensional analysis
+- Improve accuracy with hybrid algorithms
+- Enhance query API with additional parameters
+
+### 4.3. Phase 3: Production Hardening
+
+- Add comprehensive monitoring and alerting
+- Implement auto-scaling based on load
+- Optimize state management for efficiency
+- Add authentication and access controls
+
+### 4.4. Phase 4: Advanced Features
+
+- Implement anomaly detection based on heavy hitters
+- Add forecasting for future heavy hitters
+- Support custom sketch parameters per query
+- Enable historical trend analysis

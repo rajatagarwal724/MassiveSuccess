@@ -1,0 +1,172 @@
+# Transaction Isolation Levels
+
+Transaction isolation levels define how one transaction's changes are visible to other concurrent transactions. 
+They represent a tradeoff between data consistency and performance. 
+Here's a detailed breakdown of each isolation level:
+
+## 1. Read Uncommitted
+
+**Definition:** The lowest isolation level. A transaction may read data that has been modified by another transaction but not yet committed (dirty reads).
+
+**Characteristics:**
+- Allows dirty reads, non-repeatable reads, and phantom reads
+- Highest performance, lowest consistency
+- No locks on read operations
+
+**Example Scenario:**
+```
+Transaction A: UPDATE account SET balance = balance - 100 WHERE id = 1; (not yet committed)
+Transaction B: SELECT balance FROM account WHERE id = 1; (reads the uncommitted -100 change)
+Transaction A: ROLLBACK; (now Transaction B has read invalid data)
+```
+
+**Use Cases:** 
+- Reporting applications where absolute accuracy isn't critical
+- Data analysis where approximate values are acceptable
+
+## 2. Read Committed
+
+**Definition:** A transaction can only read data that has been committed by other transactions.
+
+**Characteristics:**
+- Prevents dirty reads
+- Still allows non-repeatable reads and phantom reads
+- Uses read locks that are released immediately after reading
+- Default isolation level in many databases (PostgreSQL, Oracle, SQL Server)
+
+**Example Scenario:**
+```
+Transaction A: SELECT balance FROM account WHERE id = 1; (reads 1000)
+Transaction B: UPDATE account SET balance = balance - 100 WHERE id = 1; COMMIT;
+Transaction A: SELECT balance FROM account WHERE id = 1; (now reads 900 - different from first read)
+```
+
+**Use Cases:**
+- Most general-purpose applications
+- When you need basic consistency without severe performance penalties
+
+## 3. Repeatable Read
+
+**Definition:** Ensures that if a transaction reads a row, it will continue to see the same data for that row 
+throughout the transaction.
+
+**Characteristics:**
+- Prevents dirty reads and non-repeatable reads
+- May still allow phantom reads in some databases
+- Read locks held until transaction completes
+- MySQL/InnoDB default isolation level
+
+**Example Scenario:**
+```
+Transaction A: SELECT balance FROM account WHERE balance > 500; (returns accounts 1, 2, 3)
+Transaction B: INSERT INTO account (id, balance) VALUES (4, 1000); COMMIT;
+Transaction A: SELECT balance FROM account WHERE balance > 500; (in some DBs, might now include account 4)
+```
+
+**Implementation Differences:**
+- In PostgreSQL: Prevents phantom reads through snapshot isolation
+- In MySQL/InnoDB: Prevents phantom reads for indexed records
+- In SQL Server: Allows phantom reads unless using serializable
+
+**Use Cases:**
+- Financial applications where consistency of previously read data is important
+- Applications with complex reports that need consistent data views
+
+## 4. Snapshot Isolation
+
+**Definition:** Not in the SQL standard but implemented by many modern databases. 
+Each transaction sees a consistent snapshot of the database as it existed at the start of the transaction.
+
+**Characteristics:**
+- Based on multi-version concurrency control (MVCC)
+- Prevents dirty reads, non-repeatable reads, and phantom reads
+- May still allow write skew anomalies
+- No read locks required (readers don't block writers, writers don't block readers)
+
+**Implementation:**
+- PostgreSQL: Implements as "Repeatable Read"
+- SQL Server: Implements as "Snapshot"
+- Oracle: Implements as "Serializable" with specific settings
+
+**Example of Write Skew:**
+```
+Initial balances: account_1 = 100, account_2 = 100
+Transaction A: Check if (account_1 + account_2) >= 150, then withdraw 80 from account_1
+Transaction B: Check if (account_1 + account_2) >= 150, then withdraw 80 from account_2
+Both transactions see total 200, both withdraw, final total: 40 (violated constraint)
+```
+
+**Use Cases:**
+- Analytics workloads with many reads and infrequent writes
+- Applications requiring high concurrency with strong consistency
+
+## 5. Serializable
+
+**Definition:** The highest isolation level. Guarantees that transactions execute as if they were run one after another (serially).
+
+**Characteristics:**
+- Prevents all concurrency phenomena: dirty reads, non-repeatable reads, phantom reads, and write skew
+- Strongest consistency guarantees
+- Lowest concurrency, potentially significant performance impact
+- Implementation varies significantly across databases
+
+**Implementation Approaches:**
+1. **Pessimistic (Traditional)**: Heavy locking, including predicate locks
+2. **Optimistic**: Allow transactions to proceed without locks, but validate at commit time and abort if conflicts detected
+3. **Serializable Snapshot Isolation (SSI)**: Enhances snapshot isolation with additional conflict detection
+
+**Database-Specific Implementations:**
+- PostgreSQL (9.1+): Uses SSI
+- MySQL/InnoDB: Uses pessimistic locking
+- SQL Server: Uses pessimistic locking
+- Oracle: Snapshot-based approach with additional constraints
+
+**Use Cases:**
+- Financial transactions requiring absolute consistency
+- Critical business operations where correctness trumps performance
+- Regulatory compliance scenarios
+
+## Concurrency Phenomena
+
+### 1. Dirty Read
+Reading uncommitted changes from another transaction that may later be rolled back.
+
+### 2. Non-Repeatable Read
+Reading the same row twice in a transaction and getting different values because another transaction modified it.
+
+### 3. Phantom Read
+Reading a set of rows that match a condition, then re-executing the query and finding the set has changed due to another transaction inserting or deleting rows.
+
+### 4. Write Skew
+Two transactions read the same data, make disjoint updates based on that read, and both commit, potentially violating a constraint that would have been maintained in a serialized execution.
+
+### 5. Lost Update
+When two transactions read and then update the same data, with the second update overwriting the first without incorporating its changes.
+
+## Isolation Level Comparison Matrix
+
+| Isolation Level | Dirty Reads | Non-Repeatable Reads | Phantom Reads | Write Skew | Performance |
+|-----------------|-------------|----------------------|---------------|------------|-------------|
+| Read Uncommitted| Possible    | Possible             | Possible      | Possible   | Highest     |
+| Read Committed  | Prevented   | Possible             | Possible      | Possible   | High        |
+| Repeatable Read | Prevented   | Prevented            | Possible*     | Possible   | Medium      |
+| Snapshot        | Prevented   | Prevented            | Prevented     | Possible   | Medium-Low  |
+| Serializable    | Prevented   | Prevented            | Prevented     | Prevented  | Lowest      |
+
+*Implementation-dependent, some prevent phantom reads
+
+## Database Default Isolation Levels
+
+- **PostgreSQL**: Read Committed
+- **MySQL/InnoDB**: Repeatable Read
+- **SQL Server**: Read Committed
+- **Oracle**: Read Committed
+- **MongoDB**: Read Uncommitted (can be adjusted per operation)
+
+## Choosing the Right Isolation Level
+
+Selection criteria:
+1. **Application requirements**: What anomalies can your application tolerate?
+2. **Performance needs**: Higher isolation typically means lower throughput
+3. **Concurrency patterns**: Read-heavy vs. write-heavy workloads
+4. **Database implementation**: Some databases implement certain levels more efficiently

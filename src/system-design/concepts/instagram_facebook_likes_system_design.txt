@@ -1,0 +1,114 @@
+# System Design: Maintaining Likes at Scale (Instagram/Facebook)
+
+Maintaining "likes" at the scale of Instagram and Facebook is a classic system design problem that involves handling very high write and read throughput, real-time updates, and massive data storage. Here's a breakdown of how it's typically approached:
+
+## 1. Core Requirements & Challenges:
+
+*   **High Write Volume:** Millions of users can like posts simultaneously.
+*   **High Read Volume:** Like counts and lists of likers need to be displayed on countless feeds and post views.
+*   **Real-time Updates:** Users expect to see like counts update quickly.
+*   **Scalability:** The system must scale to billions of posts and trillions of likes.
+*   **Data Integrity:** Ensure a user can't like a post multiple times (unless unliking and re-liking is allowed).
+*   **Efficiency:** Retrieving like counts and a subset of likers (e.g., "liked by friend A, friend B, and 100 others") must be fast.
+
+## 2. Data Modeling:
+
+There are several ways to model likes:
+
+*   **Option A: Relational Approach (Simplified)**
+    *   A `Likes` table: `(post_id, user_id, timestamp)`
+    *   Primary Key: `(post_id, user_id)` to ensure a user likes a post only once.
+    *   Indexes: On `post_id` (for counting likes on a post) and `user_id` (for finding posts liked by a user).
+    *   **Challenge:** Counting likes (`SELECT COUNT(*) FROM Likes WHERE post_id = X`) can become very slow with billions of rows. Joins to get liker details can also be expensive.
+
+*   **Option B: Denormalized Counts + List of Likers**
+    *   **Post Metadata Store (e.g., Cassandra, Document DB, or sharded SQL):**
+        *   `Post` object/table: `(post_id, author_id, content, ..., like_count, recent_likers_list)`
+        *   `like_count` is a denormalized counter.
+        *   `recent_likers_list` might store a few user IDs of recent or important (e.g., friends) likers.
+    *   **Likes Data Store (e.g., Cassandra, sharded SQL):**
+        *   A table/column family to store the actual like events: `(post_id, user_id, timestamp)`
+        *   Primarily used for fetching the full list of likers (paginated) or for analytics.
+        *   Sharded by `post_id` to distribute load.
+
+*   **Option C: Graph Database (like Facebook's TAO)**
+    *   Posts and Users are nodes.
+    *   A "like" is an edge between a `User` node and a `Post` node, possibly with properties like `timestamp`.
+    *   Graph databases are optimized for traversing relationships, making queries like "friends who liked this post" efficient.
+
+## 3. System Components & Flow:
+
+**A. Write Path (User Likes a Post):**
+
+1.  **Client Request:** User clicks "like" -> API Gateway.
+2.  **API Gateway:** Authenticates the request, forwards to Like Service.
+3.  **Like Service (Write Endpoint):**
+    *   **Validation:** Check if the post exists, user exists, etc.
+    *   **Idempotency:** Ensure the like isn't processed twice (e.g., using a request ID or checking if the like already exists).
+    *   **Asynchronous Processing (Crucial for Scale):**
+        *   Publishes a "like_event" (`user_id`, `post_id`, `timestamp`) to a **Message Queue** (e.g., Kafka, RabbitMQ).
+        *   Immediately returns a success response to the client (optimistic update on UI).
+4.  **Like Event Consumers (Workers/Microservices):**
+    *   **Worker 1: Update Like Data Store:**
+        *   Persists the like: `(post_id, user_id, timestamp)` into the main Likes Data Store (e.g., Cassandra table sharded by `post_id`).
+    *   **Worker 2: Update Counter Service:**
+        *   Atomically increments the `like_count` for the `post_id`. This is often done in a highly available, fast key-value store like **Redis** or a specialized counter service.
+        *   The `like_count` might also be updated in the Post Metadata Store (eventual consistency).
+    *   **Worker 3: Update Activity Feeds/Notifications (Fan-out):**
+        *   Generates notifications for the post author.
+        *   Potentially updates activity feeds of friends.
+    *   **Worker 4 (Optional): Update Search Index/Analytics.**
+
+**B. Read Path (Displaying Likes):**
+
+1.  **Client Request:** User views a post or feed -> API Gateway.
+2.  **API Gateway:** Forwards to Post Service or Feed Service.
+3.  **Service Logic:**
+    *   **Fetching Like Count:**
+        1.  Try **Cache (Level 1 - e.g., Memcached/Redis in front of the service):** Check if `like_count` for `post_id` is cached.
+        2.  If not in L1 cache, query the **Counter Service (e.g., Redis):** Get `like_count` for `post_id`.
+        3.  (Fallback/Less Frequent) If not in Counter Service, read from the denormalized `like_count` in the Post Metadata Store.
+    *   **Fetching Who Liked (e.g., "Liked by A, B and 100 others"):**
+        1.  Often, a small, socially relevant subset of likers is shown.
+        2.  Check `recent_likers_list` or `friends_who_liked_list` in the Post Metadata Store (which might be precomputed or fetched from the graph).
+        3.  For a full list (when user clicks to see all likers):
+            *   Query the Likes Data Store, paginated: `SELECT user_id FROM Likes WHERE post_id = X LIMIT Y OFFSET Z`. This query needs to be highly optimized and hit the correct shard.
+
+## 4. Key Scalability Techniques:
+
+*   **Asynchronous Writes:** Decouples the user action from backend processing, allowing the system to absorb write spikes.
+*   **Caching:**
+    *   **Like Counts:** Heavily cached in Redis/Memcached. TTLs can be short for active posts.
+    *   **Lists of Likers:** Cache partial lists (e.g., first page of likers).
+    *   **CDN for UI elements:** The like button itself.
+*   **Database Sharding:**
+    *   Shard the `Likes` data by `post_id`. This distributes writes and reads for likes across many database servers.
+    *   Shard `Post` metadata similarly.
+*   **Denormalization:** Storing `like_count` directly with the post avoids expensive `COUNT(*)` queries.
+*   **Real-time Counters:** Using distributed counters (e.g., Redis `INCR`) is much faster than RDBMS counters for high-velocity updates.
+*   **Read Replicas:** For SQL-based stores, use read replicas to scale read traffic.
+*   **Load Balancing:** At all layers (API Gateway, services, database connections).
+*   **Data Partitioning for "Who Liked":** The list of users who liked a post can be very long. This data is often stored separately and sharded by `post_id`.
+*   **Bloom Filters:** Can be used to quickly check if a user has *likely* already liked a post before hitting the database for a definitive check, reducing load on the write path for already-liked posts.
+
+## 5. Consistency:
+
+*   **Eventual Consistency:** Like counts are often eventually consistent. It's acceptable if the count is slightly delayed or off by a small margin for a short period.
+*   **Strong Consistency for the Like Action:** The write to the primary `Likes` data store (which records the `(post_id, user_id)` pair) should aim for strong consistency to prevent a user from liking a post multiple times or issues with unliking. This is often handled by the database's unique constraints on `(post_id, user_id)`.
+
+## 6. Facebook & Instagram Specifics (High-Level):
+
+*   **Facebook's TAO:** As mentioned, Facebook uses a custom graph database called TAO. Likes are edges in this graph. TAO is heavily optimized for reads and provides features like friend-of-friend queries efficiently. It uses a tiered caching approach.
+*   **Instagram (likely):** Leverages technologies like Cassandra for its scalability and write performance for storing like data. Redis is almost certainly used for counters and caching. They also employ extensive asynchronous processing.
+
+## Example Scenario: User Likes a Post
+
+1.  UI sends `POST /posts/{post_id}/like`.
+2.  Like Service receives, validates, publishes `{"user_id": "U123", "post_id": "P789"}` to Kafka topic `likes_topic`.
+3.  UI optimistically updates (shows post as liked).
+4.  Kafka Consumers:
+    *   `CounterConsumer`: `redis.incr("post:P789:like_count")`.
+    *   `DataStoreConsumer`: `cassandra.insert("likes_by_post", {post_id: "P789", user_id: "U123", liked_at: now()})`.
+    *   `NotificationConsumer`: Checks if notifications are needed for post author.
+
+This multi-faceted approach, combining asynchronous processing, specialized data stores, aggressive caching, and denormalization, allows systems like Instagram and Facebook to handle the immense scale of likes.

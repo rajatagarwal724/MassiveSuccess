@@ -1,0 +1,757 @@
+# Distributed Job Scheduler - High-Scale Architectural Design
+
+## Problem Statement
+
+The current approach of continuously querying a database to find jobs ready for execution 
+(using timestamp range queries) presents several scalability challenges:
+
+1. **Excessive database load** - Frequent queries every second put unnecessary load on the database
+2. **Scaling limitations** - As job volume increases, queries become more expensive
+3. **Latency issues** - Jobs might be delayed if the query takes too long
+4. **Resource inefficiency** - Most queries return no results when jobs are sparse
+5. **Coordination overhead** - Multiple scheduler instances might try to execute the same job
+
+## Architectural Overview
+
+Instead of constantly polling the database, we'll design a distributed job scheduler with 
+the following characteristics:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           Distributed Job Scheduler                     │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                                                                         │
+│  ┌───────────────┐    ┌───────────────┐    ┌───────────────────────┐   │
+│  │               │    │               │    │                       │   │
+│  │  Job Intake   │───▶│  Job Storage  │───▶│  Scheduler Service    │   │
+│  │   Service     │    │               │    │                       │   │
+│  │               │    │               │    │                       │   │
+│  └───────────────┘    └───────────────┘    └───────────────────────┘   │
+│                                                      │                 │
+│                                                      │                 │
+│                                                      ▼                 │
+│  ┌────────────────┐   ┌───────────────┐    ┌───────────────────────┐   │
+│  │                │   │               │    │                       │   │
+│  │  Worker Node   │◀──│  Work Queue   │◀───│   Time-Bucket Index   │   │
+│  │   Cluster      │   │               │    │                       │   │
+│  │                │   │               │    │                       │   │
+│  └────────────────┘   └───────────────┘    └───────────────────────┘   │
+│          │                                           ▲                 │
+│          │                                           │                 │
+│          │                                  ┌────────────────┐         │
+│          │                                  │                │         │
+│          │                                  │  Time-Wheel/   │         │
+│          │                                  │  Calendar      │         │
+│          │                                  │                │         │
+│          │                                  └────────────────┘         │
+│          ▼                                                             │
+│  ┌────────────────┐   ┌───────────────┐    ┌───────────────────────┐   │
+│  │                │   │               │    │                       │   │
+│  │  Result Store  │◀──│ Job Execution │◀───│    Leader Election    │   │
+│  │                │   │               │    │                       │   │
+│  │                │   │               │    │                       │   │
+│  └────────────────┘   └───────────────┘    └───────────────────────┘   │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Core Components
+
+### 1. Job Intake Service
+
+- **Purpose**: Receives job scheduling requests from clients
+- **Functionality**:
+  - Validates job definitions
+  - Assigns unique job IDs
+  - Handles job prioritization
+  - Supports various scheduling patterns (one-time, periodic, cron-like)
+- **API Endpoints**:
+  - `POST /jobs` - Schedule a new job
+  - `PUT /jobs/{id}` - Update job details
+  - `DELETE /jobs/{id}` - Cancel a scheduled job
+
+### 2. Job Storage
+
+- **Purpose**: Persistent storage of job definitions and metadata
+- **Schema Design**:
+  ```sql
+  CREATE TABLE jobs (
+    job_id UUID PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    payload JSONB NOT NULL,
+    schedule_type VARCHAR(50) NOT NULL,  -- ONE_TIME, PERIODIC, CRON
+    scheduled_time TIMESTAMP NOT NULL,
+    execution_window_seconds INT,
+    priority INT DEFAULT 0,
+    retry_policy JSONB,
+    status VARCHAR(50) NOT NULL,  -- SCHEDULED, RUNNING, COMPLETED, FAILED
+    version INT NOT NULL,         -- For optimistic concurrency control
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+  );
+  
+  CREATE INDEX idx_jobs_scheduled_time ON jobs(scheduled_time);
+  CREATE INDEX idx_jobs_status ON jobs(status);
+  ```
+
+### 3. Time-Bucket Index
+
+- **Purpose**: Organize jobs by scheduled execution time without constant querying
+- **Implementation Options**:
+  1. **Memory-mapped time buckets**:
+     - Jobs are indexed in memory by time windows (e.g., 1-minute buckets)
+     - Only load the next few buckets from the database at startup
+     - Periodically refresh buckets in the background
+  
+  2. **Hierarchical time wheel**:
+     - Multi-level time wheels for different time granularities
+     - Near-term jobs in fine-grained wheels (seconds)
+     - Far-future jobs in coarse-grained wheels (hours/days)
+     - Jobs move from coarse to fine buckets as execution time approaches
+
+### Time-Bucket Index Persistence and Recovery
+
+#### Storage Implementation
+
+The Time-Bucket Index is typically implemented using a hybrid approach:
+
+1. **Primary Storage**: In-memory data structures
+   - Fast access and manipulation 
+   - Optimized for frequent reads and updates
+   - Typically implemented as arrays or hash maps of time buckets
+   - Each bucket contains references to jobs scheduled for that time window
+
+2. **Backup/Persistence Layer**: 
+   - Redis for distributed deployments (persistent mode enabled)
+   - RocksDB for single-node deployments
+   - Periodic snapshots to durable storage
+
+#### Recovery Strategies
+
+When a scheduler service pod fails or restarts, the Time-Bucket Index must be reconstructed. There are several strategies to minimize downtime and avoid full rebuilding:
+
+1. **Incremental Rebuilding**:
+   - Load only the immediate time buckets first (next 5 minutes)
+   - Concurrently rebuild future buckets in the background
+   - Prioritize loading based on job execution times
+
+2. **Snapshot-based Recovery**:
+   - Periodically persist the Time-Bucket Index to durable storage
+   - Recover from the most recent snapshot on restart
+   - Apply incremental updates from the job database for jobs added since snapshot
+
+3. **Distributed State**:
+   - Store time bucket state in distributed caches like Redis
+   - Multiple scheduler instances share the same view of the time buckets
+   - On pod restart, new instance connects to the distributed cache
+
+4. **Write-Ahead Logging**:
+   - Log all changes to the Time-Bucket Index before applying them
+   - On restart, replay logs to reconstruct the index state
+   - Truncate logs after periodic snapshots
+
+#### Example Recovery Implementation
+
+```java
+public class ResilientTimeWheelScheduler {
+    // In-memory wheels
+    private final TimeBucket[] secondWheel = new TimeBucket[60];
+    // Other wheels...
+    
+    // Persistence components
+    private final SnapshotStore snapshotStore;
+    private final ChangelogStore changelogStore;
+    
+    public void initialize() {
+        // First, check for recent snapshot
+        Optional<TimeWheelSnapshot> snapshot = snapshotStore.getLatestSnapshot();
+        
+        if (snapshot.isPresent()) {
+            // Restore from snapshot
+            restoreFromSnapshot(snapshot.get());
+            
+            // Apply any changes since snapshot
+            List<ChangelogEntry> changes = 
+                changelogStore.getChangesSince(snapshot.get().getTimestamp());
+            applyChanges(changes);
+        } else {
+            // No snapshot, rebuild from database
+            rebuildFromDatabase();
+        }
+        
+        // Start background tasks
+        startPeriodicSnapshots();
+        startChangeLogging();
+    }
+    
+    private void restoreFromSnapshot(TimeWheelSnapshot snapshot) {
+        // Restore immediate buckets first (next 5 minutes)
+        restoreImmediateBuckets(snapshot);
+        
+        // Restore remaining buckets in background
+        CompletableFuture.runAsync(() -> {
+            restoreRemainingBuckets(snapshot);
+        });
+    }
+    
+    // Schedule periodic snapshots
+    private void startPeriodicSnapshots() {
+        ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+        executor.scheduleAtFixedRate(
+            this::takeSnapshot, 
+            SNAPSHOT_INTERVAL_SECONDS, 
+            SNAPSHOT_INTERVAL_SECONDS, 
+            TimeUnit.SECONDS
+        );
+    }
+    
+    // Additional methods...
+}
+
+### 4. Scheduler Service
+
+- **Purpose**: Core scheduling logic to determine when jobs should execute
+- **Functionality**:
+  - Uses time-bucket index to identify jobs ready for execution
+  - Employs a sliding window approach (look ahead 30-60 seconds)
+  - Handles clock skew between distributed nodes
+  - Supports backpressure mechanisms when system is overloaded
+- **Efficiency Mechanisms**:
+  - Only loads immediate and near-future time buckets
+  - Uses a cursor-based approach to track last scheduled job
+  - Employs predictive loading based on job density patterns
+
+### 5. Work Queue
+
+- **Purpose**: Decouples scheduling from execution
+- **Implementation Options**:
+  1. **Distributed queue** (Kafka, RabbitMQ, SQS):
+     - Partitioned by job type/category for parallel processing
+     - Supports delayed message delivery for fine-grained scheduling
+     - Provides at-least-once delivery semantics
+  
+  2. **Specialized job queue**:
+     - Priority-based queuing
+     - Support for job cancellation/updates
+     - Visibility timeout for job leasing
+
+### 6. Worker Node Cluster
+
+- **Purpose**: Executes scheduled jobs
+- **Design Considerations**:
+  - Horizontal scaling based on queue depth and job complexity
+  - Specialized workers for different job types
+  - Resource isolation between jobs
+  - Graceful shutdown handling for long-running jobs
+- **Features**:
+  - Adaptive concurrency control
+  - Circuit breaking for failing dependencies
+  - Resource quotas and rate limiting
+
+### 7. Leader Election
+
+- **Purpose**: Ensures only one scheduler node performs certain operations
+- **Implementation Options**:
+  1. **Consensus algorithms** (Raft, Paxos):
+     - Strong consistency guarantees
+     - Complex to implement correctly
+  
+  2. **Distributed coordination service** (ZooKeeper, etcd, Consul):
+     - Built-in leadership election primitives
+     - Ephemeral nodes for leader registration
+  
+  3. **Database-based locking**:
+     - Advisory locks or lease mechanism
+     - Periodic heartbeat to maintain leadership
+
+### Multi-Pod Scheduler Architecture
+
+#### Why Multiple Scheduler Pods?
+
+Having multiple scheduler pods is essential for:
+
+1. **High Availability** - Eliminates single point of failure
+2. **Horizontal Scaling** - Handles increasing job volume and complexity
+3. **Fault Tolerance** - Continues operation even when some pods fail
+4. **Load Distribution** - Spreads scheduling load across multiple nodes
+
+#### Cluster Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                      Kubernetes Cluster                          │
+│                                                                  │
+│  ┌────────────────┐    ┌────────────────┐    ┌────────────────┐  │
+│  │ Scheduler Pod 1│    │ Scheduler Pod 2│    │ Scheduler Pod 3│  │
+│  │ ┌────────────┐ │    │ ┌────────────┐ │    │ ┌────────────┐ │  │
+│  │ │ Time-Wheel │ │    │ │ Time-Wheel │ │    │ │ Time-Wheel │ │  │
+│  │ │   Region A  │ │    │ │   Region B  │ │    │ │   Region C  │ │  │
+│  │ └────────────┘ │    │ └────────────┘ │    │ └────────────┘ │  │
+│  └────────────────┘    └────────────────┘    └────────────────┘  │
+│           ▲                     ▲                    ▲            │
+└───────────┼─────────────────────┼────────────────────┼────────────┘
+            │                     │                    │
+            │         ┌───────────────────────┐       │
+            │         │  Distributed Cache    │       │
+            └─────────│ (Redis/Memcached)    │───────┘
+                      └───────────────────────┘
+                                 ▲
+                                 │
+                      ┌───────────────────────┐
+                      │  Database (Jobs/State)│
+                      └───────────────────────┘
+```
+
+#### Workload Distribution Strategies
+
+1. **Sharding by Time Range**:
+   - Each scheduler pod is responsible for specific time ranges
+   - Example: Pod 1 handles 00:00-08:00, Pod 2 handles 08:00-16:00, Pod 3 handles 16:00-24:00
+   - Time ranges can be dynamically reassigned based on load
+
+2. **Sharding by Job Type/Category**:
+   - Pods specialize in certain job types or categories
+   - Example: Pod 1 handles notification jobs, Pod 2 handles data processing jobs
+   - Allows for specialized optimization for different job characteristics
+
+3. **Consistent Hashing**:
+   - Jobs are distributed based on a consistent hash of job ID or attributes
+   - Minimizes redistribution when scheduler pods are added or removed
+   - Ensures even distribution across scheduler instances
+
+4. **Work Stealing**:
+   - Primary assignment based on sharding, but idle pods can "steal" work from busy ones
+   - Improves resource utilization and reduces job latency
+   - Requires coordination mechanism to prevent duplicate execution
+
+#### Database Access Pattern
+
+Scheduler pods use a combination of strategies to efficiently fetch jobs from the database:
+
+1. **Coordinated Loading**:
+   - Leader pod coordinates which time buckets each pod should load
+   - Prevents duplicate loading of the same jobs
+   - Distributes database query load across pods
+
+2. **Incremental Loading with Cursor**:
+   ```sql
+   SELECT * FROM jobs 
+   WHERE scheduled_time BETWEEN ? AND ? 
+   AND job_id > ? 
+   ORDER BY job_id 
+   LIMIT 1000;
+   ```
+   - Each pod maintains its own cursor position
+   - Allows for pagination without excessive memory usage
+   - Enables fine-grained control over database load
+
+3. **Change Data Capture (CDC)**:
+   - Subscribe to database change events (via database triggers or binlog)
+   - Receive near real-time notifications when jobs are added/updated/deleted
+   - Reduces need for polling the database
+
+#### RocksDB vs. Redis Clarification
+
+The architecture uses different persistence mechanisms based on deployment scale:
+
+1. **Redis** (distributed deployments):
+   - Shared state accessible to all scheduler pods
+   - Built-in persistence for recovery
+   - Pub/sub for cross-pod coordination
+   - Atomic operations for consistency
+
+2. **RocksDB** (single-node deployments):
+   - Embedded key-value store with high performance
+   - Lower operational complexity than Redis
+   - Better for edge deployments or simple installations
+   - Not suitable for multi-pod architectures (hence single-node mention)
+
+#### Scaling Considerations
+
+1. **Scale-Up Process**:
+   - New pod joins cluster and registers with coordination service
+   - Leader assigns time buckets/job categories to the new pod
+   - New pod loads only its assigned jobs from database
+   - Time-wheel state is shared via distributed cache for faster startup
+
+2. **Scale-Down Process**:
+   - Pod signals intention to leave before shutdown
+   - Assigned jobs are redistributed to remaining pods
+   - Gracefully completes in-progress operations
+   - Updates shared state before termination
+
+3. **Auto-Scaling Triggers**:
+   - Job queue depth exceeds threshold
+   - CPU/memory utilization reaches target percentage
+   - Scheduling latency increases beyond acceptable range
+   - Predictive scaling based on historical patterns
+
+### 8. Job Execution Service
+
+- **Purpose**: Manages the actual execution of jobs
+- **Functionality**:
+  - Job isolation and resource limits
+  - Execution timeout enforcement
+  - Retry logic with exponential backoff
+  - Capture standard output/error
+- **Execution Modes**:
+  - In-process execution
+  - Container-based isolation (Docker)
+  - Function-as-a-Service invocation
+
+### 9. Result Store
+
+- **Purpose**: Maintains job execution history and results
+- **Schema Design**:
+  ```sql
+  CREATE TABLE job_executions (
+    execution_id UUID PRIMARY KEY,
+    job_id UUID NOT NULL REFERENCES jobs(job_id),
+    worker_id VARCHAR(255) NOT NULL,
+    start_time TIMESTAMP NOT NULL,
+    end_time TIMESTAMP,
+    status VARCHAR(50) NOT NULL,  -- RUNNING, SUCCEEDED, FAILED, CANCELED
+    result JSONB,
+    error_message TEXT,
+    retry_count INT DEFAULT 0
+  );
+  
+  CREATE INDEX idx_job_executions_job_id ON job_executions(job_id);
+  ```
+
+## Advanced Architectural Approaches
+
+### Time-Wheel Calendar Approach
+
+Instead of querying the database frequently, we implement a hierarchical time wheel:
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                     Time Wheel                           │
+│                                                          │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐ │
+│  │ Second   │  │ Minute   │  │  Hour    │  │   Day    │ │
+│  │  Wheel   │  │  Wheel   │  │  Wheel   │  │  Wheel   │ │
+│  │(60 slots)│  │(60 slots)│  │(24 slots)│  │(31 slots)│ │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────┘ │
+│       │             │            │             │        │
+└───────┼─────────────┼────────────┼─────────────┼────────┘
+        ▼             ▼            ▼             ▼
+  [Jobs due in   [Jobs due in  [Jobs due in  [Jobs due in
+  next minute]    next hour]   next 24 hrs]  next month]
+```
+
+**Operation**:
+1. Jobs are placed in appropriate wheel slots based on execution time
+2. As time advances, jobs cascade down from higher to lower wheels
+3. Second wheel is continuously checked for jobs ready to execute
+4. Only loads the necessary job metadata from database when jobs move between wheels
+
+### Shard Manager Design
+
+To handle very large job volumes, implement sharding by time ranges:
+
+```
+┌─────────────────────────────┐
+│      Shard Manager          │
+└─────────────┬───────────────┘
+              │
+    ┌─────────┴─────────┐
+    ▼                   ▼
+┌─────────┐         ┌─────────┐
+│ Shard 1 │         │ Shard 2 │
+│(0-30min)│         │(30-60min)│    ...
+└─────────┘         └─────────┘
+```
+
+**Key features**:
+- Each shard responsible for a specific time window
+- Dynamic shard allocation based on job density
+- Shards are assigned to specific scheduler nodes
+- Automatic rebalancing as jobs are added/completed
+
+## Scalability Strategies
+
+### 1. Database Partitioning
+
+Partition job tables by execution time ranges to improve query performance:
+
+```sql
+CREATE TABLE jobs_2025_05 PARTITION OF jobs
+  FOR VALUES FROM ('2025-05-01') TO ('2025-06-01');
+  
+CREATE TABLE jobs_2025_06 PARTITION OF jobs
+  FOR VALUES FROM ('2025-06-01') TO ('2025-07-01');
+```
+
+### 2. Redis-Based Time Index
+
+Use Redis sorted sets as a time index for near-term jobs:
+
+```
+ZADD scheduled_jobs 1714915200 "job_id_1"  // Unix timestamp as score
+ZADD scheduled_jobs 1714918800 "job_id_2"
+
+// Query for jobs due in next minute
+ZRANGEBYSCORE scheduled_jobs 0 [current_timestamp + 60]
+```
+
+### 3. Distributed Time-Series Database
+
+Specialized time-series databases can efficiently handle time-range queries:
+
+- TimescaleDB or InfluxDB for time-bucketed job storage
+- Continuous aggregation to pre-compute job densities
+- Automatic data retention policies for completed jobs
+
+### 4. Predictive Loading
+
+Implement smart loading patterns based on historical patterns:
+
+- Analyze job submission patterns to identify peak periods
+- Pre-allocate resources during known high-demand periods
+- Adjust polling frequency based on expected job density
+
+## Consistency & Failure Handling
+
+### Job Execution Guarantees
+
+| Guarantee Level | Implementation Strategy | Trade-offs |
+|----------------|-------------------------|-----------|
+| At-most-once | Distributed consensus before starting job | Higher latency, complex implementation |
+| At-least-once | Queue-based delivery with idempotent execution | Potential duplicates, requires idempotent jobs |
+| Exactly-once | Two-phase commit or transactional outbox | Complex, higher overhead |
+
+### Failure Recovery
+
+**Scheduler node failure**:
+- Heartbeat mechanism to detect failed nodes
+- Automatic failover to standby nodes
+- Recovery of in-progress jobs through job leasing model
+
+**Worker node failure**:
+- Jobs return to queue after visibility timeout
+- Configurable retry policies with exponential backoff
+- Dead-letter queue for repeatedly failing jobs
+
+**Database failure**:
+- Read replicas for high availability
+- In-memory cache as temporary fallback
+- Graceful degradation modes (e.g., prioritize critical jobs)
+
+## Performance Optimizations
+
+### 1. Job Batching
+
+Group related jobs to reduce scheduling overhead:
+
+```json
+{
+  "batch_id": "batch_123",
+  "jobs": [
+    { "id": "job_1", "payload": {...} },
+    { "id": "job_2", "payload": {...} }
+  ],
+  "scheduled_time": "2025-05-07T19:30:00Z",
+  "concurrency": 2
+}
+```
+
+### 2. Scheduling Cache
+
+Implement a write-through cache of scheduled jobs:
+
+- Near-term jobs (next 5-15 minutes) kept entirely in memory
+- Background refresh to keep cache current
+- Multiple scheduling nodes share cache through distributed cache
+
+### 3. Adaptive Polling
+
+Rather than fixed polling intervals, adjust dynamically:
+
+- Increase polling frequency when jobs are densely scheduled
+- Reduce frequency during quiet periods
+- Calculate next poll time based on earliest scheduled job
+
+## Implementation Example
+
+### Scheduler Core (Pseudocode)
+
+```java
+public class TimeWheelScheduler {
+    private final TimeBucket[] secondWheel = new TimeBucket[60];
+    private final TimeBucket[] minuteWheel = new TimeBucket[60];
+    private final TimeBucket[] hourWheel = new TimeBucket[24];
+    private final JobRepository jobRepository;
+    private final WorkQueue workQueue;
+    
+    public void initialize() {
+        // Load next hour's jobs from database into appropriate wheels
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime nextHour = now.plusHours(1);
+        
+        List<Job> upcomingJobs = jobRepository.findJobsDueBetween(now, nextHour);
+        for (Job job : upcomingJobs) {
+            addToWheel(job);
+        }
+        
+        // Start the clock tick thread
+        startTickThread();
+    }
+    
+    private void startTickThread() {
+        ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+        executor.scheduleAtFixedRate(this::tick, 0, 1, TimeUnit.SECONDS);
+    }
+    
+    private synchronized void tick() {
+        // Current second in minute
+        int currentSecond = LocalDateTime.now().getSecond();
+        
+        // Process jobs in current second bucket
+        TimeBucket bucket = secondWheel[currentSecond];
+        if (bucket != null) {
+            for (Job job : bucket.getJobs()) {
+                workQueue.enqueue(job);
+            }
+            bucket.clear();
+        }
+        
+        // If we completed a minute, cascade jobs from minute wheel to second wheel
+        if (currentSecond == 0) {
+            cascadeMinuteWheel();
+        }
+        
+        // If we completed an hour, cascade jobs from hour wheel to minute wheel
+        if (currentSecond == 0 && LocalDateTime.now().getMinute() == 0) {
+            cascadeHourWheel();
+            
+            // Also load next hour's jobs from database
+            loadNextHourJobs();
+        }
+    }
+    
+    private void cascadeMinuteWheel() {
+        int currentMinute = LocalDateTime.now().getMinute();
+        TimeBucket bucket = minuteWheel[currentMinute];
+        if (bucket != null) {
+            for (Job job : bucket.getJobs()) {
+                addToSecondWheel(job);
+            }
+            bucket.clear();
+        }
+    }
+    
+    // Additional methods for cascading other wheels and adding jobs to wheels...
+}
+```
+
+## Monitoring & Observability
+
+### Key Metrics
+
+1. **Job Processing Stats**
+   - Scheduling latency (time from due to execution)
+   - Execution time distribution
+   - Success/failure rates by job type
+
+2. **Resource Utilization**
+   - Queue depths by priority/type
+   - Worker node utilization
+   - Database IOPS and query latency
+
+3. **System Health**
+   - Scheduler node status
+   - Lost leadership events
+   - Cache hit/miss rates
+
+### Logging Strategy
+
+Structured logging with correlation IDs:
+
+```json
+{
+  "timestamp": "2025-05-07T19:30:05.123Z",
+  "level": "INFO",
+  "event": "job_scheduled",
+  "job_id": "a1b2c3d4",
+  "scheduled_time": "2025-05-07T19:35:00Z",
+  "scheduler_node": "scheduler-pod-123",
+  "correlation_id": "trace-xyz-789"
+}
+```
+
+## Deployment Architecture
+
+### Kubernetes-Based Deployment
+
+```yaml
+# Scheduler deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: job-scheduler
+spec:
+  replicas: 3  # Multiple for HA, only one will be leader
+  selector:
+    matchLabels:
+      app: job-scheduler
+  template:
+    metadata:
+      labels:
+        app: job-scheduler
+    spec:
+      containers:
+      - name: scheduler
+        image: job-scheduler:v1.0
+        resources:
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        env:
+        - name: REDIS_HOST
+          value: "redis-master"
+        - name: DB_CONNECTION_STRING
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: connection-string
+
+# Worker deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: job-workers
+spec:
+  replicas: 10  # Scale based on load
+  selector:
+    matchLabels:
+      app: job-worker
+  template:
+    metadata:
+      labels:
+        app: job-worker
+    spec:
+      containers:
+      - name: worker
+        image: job-worker:v1.0
+        resources:
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+```
+
+## Conclusion
+
+A well-architected distributed job scheduler should avoid constant database polling by implementing:
+
+1. **Time-bucketed approach** - Organizing jobs into time windows
+2. **Hierarchical timing wheels** - Efficient for managing jobs across different time horizons
+3. **In-memory scheduling** - Keeping near-term jobs in memory for fast access
+4. **Smart pre-loading** - Loading only the jobs that will execute soon
+5. **Distributed coordination** - Using leader election to prevent duplicate execution
+
+The combination of these techniques allows for highly scalable job scheduling that minimizes database 

@@ -1,0 +1,319 @@
+/*
+Vending Machine - Java Implementation
+
+Problem Statement:
+Design and implement a vending machine with the following requirements:
+1. Accepts coins of 1,5,10,25,50 cents (penny, nickel, dime, quarter, half-dollar)
+2. Allow user to select products (coke, pepsi, soda, etc.)
+3. Allow user to take refund by canceling the request
+4. Return selected product and remaining change if any
+5. Allow reset operation for maintenance
+6. Handle all edge cases (insufficient change, sold out items, etc.)
+*/
+
+import java.util.*;
+
+// Item class to represent products in vending machine
+class Item {
+    private String name;
+    private int price; // in cents
+    private int quantity;
+
+    public Item(String name, int price, int quantity) {
+        this.name = name;
+        this.price = price;
+        this.quantity = quantity;
+    }
+
+    // Getters and Setters
+    public String getName() { return name; }
+    public int getPrice() { return price; }
+    public int getQuantity() { return quantity; }
+    public void setQuantity(int quantity) { this.quantity = quantity; }
+    public void reduceQuantity() { if(quantity > 0) quantity--; }
+    public boolean isAvailable() { return quantity > 0; }
+}
+
+// Coin enum to represent different coin types
+enum Coin {
+    PENNY(1), NICKEL(5), DIME(10), QUARTER(25), HALF_DOLLAR(50), DOLLAR(100);
+    
+    private int value;
+    
+    private Coin(int value) {
+        this.value = value;
+    }
+    
+    public int getValue() {
+        return value;
+    }
+}
+
+// Custom exceptions
+class SoldOutException extends Exception {
+    public SoldOutException(String message) {
+        super(message);
+    }
+}
+
+class NotSufficientChangeException extends Exception {
+    public NotSufficientChangeException(String message) {
+        super(message);
+    }
+}
+
+class NotFullPaidException extends Exception {
+    private double remaining;
+    
+    public NotFullPaidException(String message, double remaining) {
+        super(message);
+        this.remaining = remaining;
+    }
+    
+    public double getRemaining() {
+        return remaining;
+    }
+}
+
+// Main Vending Machine class
+public class VendingMachine {
+    private Map<Integer, Item> items; // item code to item mapping
+    private Map<Coin, Integer> coinInventory;
+    private Map<Coin, Integer> currentCoins;
+    private int currentBalance;
+    private Item currentItem;
+    private boolean isReset;
+    
+    public VendingMachine() {
+        items = new HashMap<>();
+        coinInventory = new EnumMap<>(Coin.class);
+        currentCoins = new EnumMap<>(Coin.class);
+        initialize();
+    }
+    
+    private void initialize() {
+        // Initialize with some items
+        items.put(1, new Item("Coke", 25, 10));
+        items.put(2, new Item("Pepsi", 35, 10);
+        items.put(3, new Item("Soda", 45, 10);
+        items.put(4, new Item("Chips", 50, 10);
+        
+        // Initialize coin inventory
+        for (Coin coin : Coin.values()) {
+            coinInventory.put(coin, 10); // Start with 10 coins of each type
+        }
+        
+        currentBalance = 0;
+        currentItem = null;
+        isReset = false;
+    }
+    
+    // Reset the vending machine (for maintenance)
+    public synchronized void reset() {
+        initialize();
+        isReset = true;
+        System.out.println("Vending Machine has been reset");
+    }
+    
+    // Display all available items
+    public void displayItems() {
+        System.out.println("\nAvailable Items:");
+        System.out.println("----------------");
+        items.entrySet().stream()
+            .filter(entry -> entry.getValue().isAvailable())
+            .forEach(entry -> {
+                Item item = entry.getValue();
+                System.out.printf("%d. %-10s $%.2f (Available: %d)\n", 
+                    entry.getKey(), item.getName(), item.getPrice()/100.0, item.getQuantity());
+            });
+    }
+    
+    // Select an item
+    public void selectItem(int itemCode) throws SoldOutException {
+        Item item = items.get(itemCode);
+        if (item == null || !item.isAvailable()) {
+            throw new SoldOutException("Selected item is not available");
+        }
+        this.currentItem = item;
+        System.out.println("Selected: " + item.getName() + " - $" + (item.getPrice()/100.0));
+    }
+    
+    // Insert coins
+    public void insertCoin(Coin coin) {
+        int count = currentCoins.getOrDefault(coin, 0);
+        currentCoins.put(coin, count + 1);
+        currentBalance += coin.getValue();
+        System.out.println("Inserted: " + coin.name() + " ($" + (coin.getValue()/100.0) + ")");
+    }
+    
+    // Process the purchase
+    public Map<Coin, Integer> purchase() throws NotSufficientChangeException, NotFullPaidException {
+        if (currentItem == null) {
+            throw new IllegalStateException("No item selected");
+        }
+        
+        int price = currentItem.getPrice();
+        
+        // Check if full amount is paid
+        if (currentBalance < price) {
+            double remaining = (price - currentBalance) / 100.0;
+            throw new NotFullPaidException("Insufficient funds. Please insert $" + remaining + " more.", remaining);
+        }
+        
+        // Calculate change
+        int changeAmount = currentBalance - price;
+        Map<Coin, Integer> change = getChange(changeAmount);
+        
+        // Update inventory
+        currentItem.reduceQuantity();
+        
+        // Update coin inventory
+        currentCoins.forEach((coin, count) -> 
+            coinInventory.merge(coin, count, Integer::sum));
+        
+        // Reset state
+        currentBalance = 0;
+        currentItem = null;
+        currentCoins.clear();
+        
+        System.out.println("\nDispensing item... Enjoy!");
+        return change;
+    }
+    
+    // Helper method to calculate change
+    private Map<Coin, Integer> getChange(int amount) throws NotSufficientChangeException {
+        Map<Coin, Integer> change = new EnumMap<>(Coin.class);
+        int remaining = amount;
+        
+        // Sort coins in descending order
+        List<Coin> sortedCoins = Arrays.asList(Coin.values());
+        sortedCoins.sort((a, b) -> b.getValue() - a.getValue());
+        
+        for (Coin coin : sortedCoins) {
+            if (remaining <= 0) break;
+            
+            int availableCoins = coinInventory.getOrDefault(coin, 0);
+            if (availableCoins > 0) {
+                int maxCoins = Math.min(remaining / coin.getValue(), availableCoins);
+                if (maxCoins > 0) {
+                    change.put(coin, maxCoins);
+                    remaining -= maxCoins * coin.getValue();
+                    coinInventory.put(coin, availableCoins - maxCoins);
+                }
+            }
+        }
+        
+        if (remaining > 0) {
+            throw new NotSufficientChangeException("Not enough change available");
+        }
+        
+        return change;
+    }
+    
+    // Cancel request and return inserted coins
+    public Map<Coin, Integer> cancel() {
+        Map<Coin, Integer> refund = new EnumMap<>(currentCoins);
+        currentCoins.clear();
+        currentBalance = 0;
+        currentItem = null;
+        return refund;
+    }
+    
+    // Main method for testing
+    public static void main(String[] args) {
+        VendingMachine vm = new VendingMachine();
+        Scanner scanner = new Scanner(System.in);
+        
+        try {
+            while (true) {
+                System.out.println("\n=== Vending Machine ===");
+                vm.displayItems();
+                
+                System.out.println("\n1. Select Item\n2. Insert Coin\n3. Purchase\n4. Cancel\n5. Reset\n6. Exit");
+                System.out.print("Select option: ");
+                int option = scanner.nextInt();
+                
+                try {
+                    switch (option) {
+                        case 1: // Select Item
+                            System.out.print("Enter item code: ");
+                            int itemCode = scanner.nextInt();
+                            vm.selectItem(itemCode);
+                            break;
+                            
+                        case 2: // Insert Coin
+                            System.out.println("1. Penny ($0.01)\n2. Nickel ($0.05)\n3. Dime ($0.10)" +
+                                              "\n4. Quarter ($0.25)\n5. Half Dollar ($0.50)\n6. Dollar ($1.00)");
+                            System.out.print("Select coin type: ");
+                            int coinType = scanner.nextInt();
+                            Coin coin = Coin.values()[coinType-1];
+                            vm.insertCoin(coin);
+                            break;
+                            
+                        case 3: // Purchase
+                            Map<Coin, Integer> change = vm.purchase();
+                            if (!change.isEmpty()) {
+                                System.out.print("Your change: ");
+                                change.forEach((c, count) -> 
+                                    System.out.print(count + "x" + c.name() + " "));
+                                System.out.println();
+                            }
+                            break;
+                            
+                        case 4: // Cancel
+                            Map<Coin, Integer> refund = vm.cancel();
+                            if (!refund.isEmpty()) {
+                                System.out.print("Refund: ");
+                                refund.forEach((c, count) -> 
+                                    System.out.print(count + "x" + c.name() + " "));
+                                System.out.println();
+                            }
+                            break;
+                            
+                        case 5: // Reset
+                            vm.reset();
+                            break;
+                            
+                        case 6: // Exit
+                            System.out.println("Thank you for using our Vending Machine!");
+                            return;
+                            
+                        default:
+                            System.out.println("Invalid option");
+                    }
+                } catch (Exception e) {
+                    System.out.println("Error: " + e.getMessage());
+                }
+            }
+        } finally {
+            scanner.close();
+        }
+    }
+}
+
+/*
+Key Features and Design Decisions:
+1. Item Management: Each item has a price and quantity
+2. Coin Management: Tracks different coin types and their quantities
+3. State Management: Maintains current state (selected item, inserted coins, etc.)
+4. Exception Handling: Custom exceptions for different error scenarios
+5. Thread Safety: Uses synchronized methods for thread safety
+6. Extensibility: Easy to add new items or coin types
+
+Time Complexity:
+- Item selection: O(1)
+- Coin insertion: O(1)
+- Purchase: O(C) where C is number of coin types
+- Change calculation: O(C log C) due to sorting coins
+
+Space Complexity:
+- O(N + C) where N is number of items and C is number of coin types
+
+Potential Enhancements:
+1. Add support for bills
+2. Implement a database for persistent storage
+3. Add user authentication for maintenance
+4. Implement a web interface
+5. Add transaction logging
+6. Support for multiple payment methods (credit card, mobile pay)
+*/

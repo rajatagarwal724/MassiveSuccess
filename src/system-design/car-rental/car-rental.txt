@@ -1,0 +1,411 @@
+# Car Rental System - Enterprise-Level System Design
+
+## 1. System Requirements & Constraints
+
+### Functional Requirements:
+- User registration and authentication
+- Car inventory management
+- Reservation and booking management
+- Payment processing
+- Rating and review system
+- Admin dashboard for operations
+- Vehicle tracking and management
+- Reporting and analytics
+
+### Non-Functional Requirements:
+- High availability (99.99% uptime)
+- Horizontal scalability to handle peak loads
+- Strong security for payment and personal data
+- Low latency (response time < 200ms)
+- Geographic distribution for global access
+- Data consistency across distributed services
+
+## 2. High-Level Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│  ┌───────────┐     ┌───────────┐    ┌───────────┐     ┌───────────┐        │
+│  │   Client  │     │    CDN    │    │   API     │     │ Load      │        │
+│  │ Web/Mobile│────▶│  Layer    │───▶│ Gateway   │────▶│ Balancer  │        │
+│  └───────────┘     └───────────┘    └───────────┘     └───────────┘        │
+│                                                             │              │
+│                                                             ▼              │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                         Microservices Layer                         │   │
+│  │                                                                     │   │
+│  │  ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐           │   │
+│  │  │  User     │ │ Vehicle   │ │ Booking   │ │ Payment   │           │   │
+│  │  │ Service   │ │ Service   │ │ Service   │ │ Service   │           │   │
+│  │  └───────────┘ └───────────┘ └───────────┘ └───────────┘           │   │
+│  │                                                                     │   │
+│  │  ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐           │   │
+│  │  │ Rating    │ │ Tracking  │ │ Analytics │ │ Admin     │           │   │
+│  │  │ Service   │ │ Service   │ │ Service   │ │ Service   │           │   │
+│  │  └───────────┘ └───────────┘ └───────────┘ └───────────┘           │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                     │                                       │
+│                                     ▼                                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                         Persistence Layer                           │   │
+│  │                                                                     │   │
+│  │  ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐           │   │
+│  │  │  SQL      │ │ NoSQL     │ │ Cache     │ │ Message   │           │   │
+│  │  │ Database  │ │ Database  │ │ (Redis)   │ │ Queue     │           │   │
+│  │  └───────────┘ └───────────┘ └───────────┘ └───────────┘           │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+## 3. Detailed Component Design
+
+### User Service
+- Authentication (OAuth, JWT)
+- User profile management
+- Role-based authorization
+- User preferences and history
+
+### Vehicle Service
+- Inventory management
+- Vehicle details and status
+- Available/unavailable status
+- Maintenance schedule
+
+### Booking Service
+- Reservation management
+- Availability checking
+- Booking workflow and state machine
+- Confirmation and notifications
+
+### Payment Service
+- Payment processing
+- Integration with payment gateways
+- Invoicing
+- Refund processing
+
+### Rating Service
+- Customer feedback
+- Vehicle ratings
+- Review moderation
+- Rating analytics
+
+### Tracking Service
+- GPS integration
+- Real-time location updates
+- Geofencing
+- Utilization tracking
+
+### Analytics Service
+- Business intelligence
+- Reporting
+- Predictive analytics
+- Customer behavior analysis
+
+### Admin Service
+- Dashboard for operations
+- Fleet management
+- User management
+- System configuration
+
+## 4. Database Schema Design
+
+### Primary Database (SQL - PostgreSQL)
+
+#### Users Table
+```sql
+CREATE TABLE users (
+    user_id UUID PRIMARY KEY,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    first_name VARCHAR(100) NOT NULL,
+    last_name VARCHAR(100) NOT NULL,
+    phone_number VARCHAR(20) NOT NULL,
+    address TEXT,
+    driver_license_number VARCHAR(50),
+    driver_license_state VARCHAR(50),
+    driver_license_expiry DATE,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'active'
+);
+```
+
+#### Vehicles Table
+```sql
+CREATE TABLE vehicles (
+    vehicle_id UUID PRIMARY KEY,
+    make VARCHAR(100) NOT NULL,
+    model VARCHAR(100) NOT NULL,
+    year INTEGER NOT NULL,
+    color VARCHAR(50) NOT NULL,
+    license_plate VARCHAR(20) UNIQUE NOT NULL,
+    vin VARCHAR(17) UNIQUE NOT NULL,
+    category_id UUID REFERENCES vehicle_categories(category_id),
+    location_id UUID REFERENCES locations(location_id),
+    status VARCHAR(20) NOT NULL,
+    daily_rate DECIMAL(10,2) NOT NULL,
+    mileage INTEGER NOT NULL,
+    last_maintenance_date DATE,
+    next_maintenance_date DATE,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+```
+
+#### Bookings Table
+```sql
+CREATE TABLE bookings (
+    booking_id UUID PRIMARY KEY,
+    user_id UUID REFERENCES users(user_id),
+    vehicle_id UUID REFERENCES vehicles(vehicle_id),
+    pickup_location_id UUID REFERENCES locations(location_id),
+    dropoff_location_id UUID REFERENCES locations(location_id),
+    pickup_datetime TIMESTAMP NOT NULL,
+    expected_dropoff_datetime TIMESTAMP NOT NULL,
+    actual_dropoff_datetime TIMESTAMP,
+    booking_status VARCHAR(20) NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    total_amount DECIMAL(10,2) NOT NULL,
+    payment_id UUID REFERENCES payments(payment_id)
+);
+```
+
+### NoSQL Document Store (MongoDB)
+
+#### Vehicle Inventory Collection
+```json
+{
+  "_id": "ObjectId",
+  "vehicle_id": "UUID",
+  "details": {
+    "make": "String",
+    "model": "String",
+    "year": "Number",
+    "features": ["String"],
+    "specs": {
+      "engine": "String",
+      "transmission": "String",
+      "fuel_type": "String",
+      "mpg": "Number"
+    },
+    "images": ["URL"]
+  },
+  "availability": {
+    "status": "String",
+    "current_location": {
+      "location_id": "UUID",
+      "geo": {
+        "type": "Point",
+        "coordinates": [longitude, latitude]
+      }
+    },
+    "available_dates": [{
+      "start_date": "ISODate",
+      "end_date": "ISODate"
+    }]
+  },
+  "pricing": {
+    "base_daily_rate": "Number",
+    "dynamic_rates": [{
+      "date_range": {
+        "start_date": "ISODate",
+        "end_date": "ISODate"
+      },
+      "rate": "Number"
+    }],
+    "discounts": [{
+      "type": "String",
+      "percentage": "Number",
+      "valid_until": "ISODate"
+    }]
+  },
+  "maintenance": {
+    "history": [{
+      "date": "ISODate",
+      "type": "String",
+      "notes": "String",
+      "cost": "Number"
+    }],
+    "next_scheduled": "ISODate"
+  }
+}
+```
+
+### Cache Layer (Redis)
+
+- Vehicle availability cache
+- User session data
+- Rate limiting information
+- Hot data for quick access
+
+## 5. API Design
+
+### RESTful API Endpoints
+
+**User Service:**
+- `POST /api/v1/users` - Register new user
+- `GET /api/v1/users/{id}` - Get user profile
+- `PUT /api/v1/users/{id}` - Update user profile
+- `POST /api/v1/auth/login` - Authenticate user
+- `POST /api/v1/auth/logout` - Logout user
+
+**Vehicle Service:**
+- `GET /api/v1/vehicles` - List all vehicles with filtering
+- `GET /api/v1/vehicles/{id}` - Get vehicle details
+- `POST /api/v1/vehicles` - Add new vehicle
+- `PUT /api/v1/vehicles/{id}` - Update vehicle details
+- `GET /api/v1/vehicles/available` - Get available vehicles
+
+**Booking Service:**
+- `POST /api/v1/bookings` - Create new booking
+- `GET /api/v1/bookings/{id}` - Get booking details
+- `PUT /api/v1/bookings/{id}` - Update booking
+- `GET /api/v1/bookings/user/{userId}` - Get user bookings
+- `POST /api/v1/bookings/{id}/cancel` - Cancel booking
+
+**Payment Service:**
+- `POST /api/v1/payments` - Process payment
+- `GET /api/v1/payments/{id}` - Get payment details
+- `POST /api/v1/payments/{id}/refund` - Process refund
+
+## 6. Scalability Considerations
+
+### Horizontal Scaling
+- Stateless microservices allow for easy horizontal scaling
+- Auto-scaling based on load metrics
+- Database sharding by geographic region
+
+### Caching Strategy
+- Multi-level caching (client, CDN, application)
+- Redis for frequently accessed data
+- Cache invalidation strategies
+
+### Data Partitioning
+- Sharding by location or time period
+- Read replicas for high-read scenarios
+- Write-through caching for consistency
+
+### Load Balancing
+- Layer 7 load balancing at API Gateway
+- Consistent hashing for service discovery
+- Health checks and circuit breaking
+
+## 7. Data Flow Diagrams
+
+### Booking Flow
+
+```
+┌──────────┐     ┌───────────┐     ┌───────────┐     ┌───────────┐     ┌───────────┐
+│  Client  │────▶│  Vehicle  │────▶│  Booking  │────▶│  Payment  │────▶│Notification│
+│          │     │  Service  │     │  Service  │     │  Service  │     │  Service  │
+└──────────┘     └───────────┘     └───────────┘     └───────────┘     └───────────┘
+      │                                  │                 │                 │
+      │                                  │                 │                 │
+      │                                  ▼                 │                 │
+      │                           ┌───────────┐           │                 │
+      │                           │   SQL     │           │                 │
+      │                           │ Database  │           │                 │
+      │                           └───────────┘           │                 │
+      │                                                   │                 │
+      │                                                   ▼                 │
+      │                                            ┌───────────┐           │
+      │                                            │  Payment  │           │
+      │                                            │  Gateway  │           │
+      │                                            └───────────┘           │
+      │                                                                    │
+      ▼                                                                    ▼
+┌──────────┐                                                        ┌───────────┐
+│  User    │◀───────────────────────────────────────────────────────│   Email/  │
+│ Browser  │                                                        │    SMS    │
+└──────────┘                                                        └───────────┘
+```
+
+## 8. Sequence Diagram for Vehicle Booking
+
+```
+┌────────┐        ┌────────────┐        ┌────────────┐        ┌────────────┐
+│ Client │        │ API Gateway│        │Booking Svc │        │Vehicle Svc │
+└───┬────┘        └─────┬──────┘        └─────┬──────┘        └─────┬──────┘
+    │                   │                     │                     │
+    │  Search Vehicles  │                     │                     │
+    │──────────────────▶│                     │                     │
+    │                   │  Check Availability │                     │
+    │                   │────────────────────────────────────────────▶│
+    │                   │                     │                     │
+    │                   │  Available Vehicles │                     │
+    │                   │◀───────────────────────────────────────────│
+    │                   │                     │                     │
+    │   Vehicle List    │                     │                     │
+    │◀──────────────────│                     │                     │
+    │                   │                     │                     │
+    │   Make Booking    │                     │                     │
+    │──────────────────▶│                     │                     │
+    │                   │   Create Booking    │                     │
+    │                   │────────────────────▶│                     │
+    │                   │                     │  Update Vehicle     │
+    │                   │                     │────────────────────▶│
+    │                   │                     │                     │
+    │                   │                     │  Vehicle Updated    │
+    │                   │                     │◀────────────────────│
+    │                   │                     │                     │
+    │                   │   Booking Created   │                     │
+    │                   │◀────────────────────│                     │
+    │                   │                     │                     │
+    │  Booking Details  │                     │                     │
+    │◀──────────────────│                     │                     │
+    │                   │                     │                     │
+└───┬────┘        └─────┬──────┘        └─────┬──────┘        └─────┬──────┘
+    │                   │                     │                     │
+```
+
+## 9. Security Considerations
+
+### Authentication & Authorization
+- OAuth 2.0 / OpenID Connect for authentication
+- JWT for stateless session management
+- Role-based access control (RBAC)
+- API key management for service-to-service communication
+
+### Data Protection
+- Encryption at rest and in transit (TLS 1.3)
+- PII data encryption
+- Tokenization for payment information
+- Regular security audits and penetration testing
+
+### Infrastructure Security
+- WAF (Web Application Firewall)
+- DDoS protection
+- Network segmentation
+- Regular vulnerability scanning
+
+## 10. Monitoring & Logging
+
+### Observability Stack
+- Distributed tracing (Jaeger/Zipkin)
+- Metrics collection (Prometheus)
+- Log aggregation (ELK Stack)
+- Alerting system (Grafana/PagerDuty)
+
+### Health Checks
+- Service level health checks
+- Database health monitoring
+- Resource utilization tracking
+- SLA monitoring
+
+## 11. Disaster Recovery
+
+### Backup Strategy
+- Regular automated backups
+- Point-in-time recovery
+- Geographic redundancy for data
+- Backup validation and testing
+
+### Failover Mechanisms
+- Multi-region deployment
+- Automatic failover for critical services
+- Data replication across zones
+- Recovery point objective (RPO) and recovery time objective (RTO) planning
+
+This comprehensive system design provides a blueprint for a highly scalable car rental system that meets the requirements of principal engineer or architect level. The design emphasizes scalability, reliability, and security while providing a seamless user experience.

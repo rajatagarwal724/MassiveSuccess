@@ -1,0 +1,691 @@
+# Top K Heavy Hitters - Kappa Architecture: Stream Processing Pipeline
+
+**Version:** 1.0
+**Last Updated:** 2025-06-01
+
+## 1. Stream Processing Overview
+
+The stream processing pipeline is the core component of our Kappa Architecture implementation. It consumes events from Kafka, processes them using probabilistic algorithms, and produces up-to-date Top K results.
+
+### 1.1. Technologies
+
+- **Primary Framework:** Apache Flink
+- **Alternative Options:** Kafka Streams, Apache Spark Streaming, Apache Samza
+- **State Backend:** RocksDB for local state, S3/HDFS for checkpoints
+
+### 1.2. Processing Model
+
+We implement a stateful streaming application with:
+
+- **Event time processing** for handling late-arriving data
+- **Watermarking** to track progress and trigger window computations
+- **Keyed state** for parallel processing across multiple dimensions
+- **Checkpointing** for fault tolerance and recovery
+
+## 2. Flink Job Implementation
+
+### 2.1. Main Job Structure
+
+```java
+public class TopKHeavyHittersJob {
+    public static void main(String[] args) throws Exception {
+        // Parse configuration parameters
+        final ParameterTool params = ParameterTool.fromArgs(args);
+        final String kafkaBootstrapServers = params.get("kafka.bootstrap.servers", "kafka:9092");
+        final String kafkaTopic = params.get("kafka.topic", "events");
+        final String redisHost = params.get("redis.host", "redis");
+        final int redisPort = params.getInt("redis.port", 6379);
+        final int topK = params.getInt("topk", 100);
+        final int parallelism = params.getInt("parallelism", 16);
+        final long checkpointInterval = params.getLong("checkpoint.interval", 60000); // 1 minute
+        
+        // Flink execution environment setup
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.enableCheckpointing(checkpointInterval);
+        env.setStateBackend(new RocksDBStateBackend("s3://bucket/checkpoints"));
+        env.setParallelism(parallelism);
+        
+        // Create Kafka consumer
+        Properties kafkaProps = new Properties();
+        kafkaProps.setProperty("bootstrap.servers", kafkaBootstrapServers);
+        kafkaProps.setProperty("group.id", "heavy-hitters-processor");
+        
+        FlinkKafkaConsumer<String> consumer = new FlinkKafkaConsumer<>(
+            kafkaTopic, new SimpleStringSchema(), kafkaProps);
+        
+        // Process the stream
+        DataStream<String> rawEvents = env.addSource(consumer);
+        
+        // Parse and transform raw events
+        DataStream<Event> parsedEvents = rawEvents
+            .map(new EventParser())
+            .assignTimestampsAndWatermarks(
+                WatermarkStrategy.<Event>forBoundedOutOfOrderness(Duration.ofMinutes(1))
+                    .withTimestampAssigner((event, timestamp) -> event.getTimestamp()));
+        
+        // Extract items to track
+        DataStream<ItemEvent> itemEvents = parsedEvents
+            .flatMap(new ItemExtractor());
+        
+        // Process with windowing
+        processWindowedHeavyHitters(itemEvents, "1-minute", Time.minutes(1), topK, redisHost, redisPort);
+        processWindowedHeavyHitters(itemEvents, "1-hour", Time.hours(1), topK, redisHost, redisPort);
+        processWindowedHeavyHitters(itemEvents, "1-day", Time.days(1), topK, redisHost, redisPort);
+        
+        // Process global heavy hitters
+        processGlobalHeavyHitters(itemEvents, topK, redisHost, redisPort);
+        
+        // Execute the job
+        env.execute("Top-K Heavy Hitters");
+    }
+    
+    // Additional methods for window processing and global processing
+    // ...
+}
+```
+
+### 2.2. Event Parsing and Item Extraction
+
+```java
+public class EventParser implements MapFunction<String, Event> {
+    private final ObjectMapper mapper = new ObjectMapper();
+    
+    @Override
+    public Event map(String value) throws Exception {
+        JsonNode rootNode = mapper.readTree(value);
+        
+        // Extract common metadata
+        String eventId = rootNode.path("metadata").path("eventId").asText();
+        String eventType = rootNode.path("metadata").path("eventType").asText();
+        String source = rootNode.path("metadata").path("source").asText();
+        long timestamp = parseTimestamp(rootNode.path("metadata").path("timestamp").asText());
+        
+        // Extract payload based on event type
+        JsonNode payloadNode = rootNode.path("payload");
+        Map<String, String> payload = new HashMap<>();
+        payloadNode.fields().forEachRemaining(entry -> 
+            payload.put(entry.getKey(), entry.getValue().asText()));
+        
+        return new Event(eventId, eventType, source, timestamp, payload);
+    }
+    
+    private long parseTimestamp(String timestamp) {
+        return Instant.parse(timestamp).toEpochMilli();
+    }
+}
+
+public class ItemExtractor implements FlatMapFunction<Event, ItemEvent> {
+    @Override
+    public void flatMap(Event event, Collector<ItemEvent> out) {
+        // Extract items based on event type
+        switch (event.getEventType()) {
+            case "page_view":
+                extractPageViewItems(event, out);
+                break;
+            case "product_view":
+                extractProductViewItems(event, out);
+                break;
+            case "api_request":
+                extractApiRequestItems(event, out);
+                break;
+            // Additional event types
+        }
+    }
+    
+    private void extractPageViewItems(Event event, Collector<ItemEvent> out) {
+        Map<String, String> payload = event.getPayload();
+        String url = payload.get("url");
+        if (url != null) {
+            // Output URL as an item
+            Map<String, String> dimensions = new HashMap<>();
+            dimensions.put("deviceType", payload.getOrDefault("deviceType", "unknown"));
+            dimensions.put("pageCategory", payload.getOrDefault("pageCategory", "unknown"));
+            
+            out.collect(new ItemEvent(url, "url", dimensions, 1, event.getTimestamp()));
+        }
+    }
+    
+    // Additional extraction methods for other event types
+    // ...
+}
+```
+
+### 2.3. Windowed Processing
+
+```java
+private static void processWindowedHeavyHitters(
+        DataStream<ItemEvent> itemEvents,
+        String windowName,
+        Time windowSize,
+        int topK,
+        String redisHost,
+        int redisPort) {
+    
+    // Process each dimension separately
+    for (String dimension : SUPPORTED_DIMENSIONS) {
+        // Key by dimension value to distribute processing
+        KeyedStream<ItemEvent, String> keyedByDimension = itemEvents
+            .filter(event -> event.getDimensions().containsKey(dimension))
+            .keyBy(event -> event.getDimensions().get(dimension));
+        
+        // Apply windowing
+        WindowedStream<ItemEvent, String, TimeWindow> windowedStream = keyedByDimension
+            .window(TumblingEventTimeWindows.of(windowSize));
+        
+        // Process each window with heavy hitter detection
+        DataStream<WindowedHeavyHitters> dimensionHeavyHitters = windowedStream
+            .process(new HeavyHittersWindowFunction(topK));
+        
+        // Aggregate across all dimension values
+        DataStream<WindowedHeavyHitters> aggregatedHeavyHitters = dimensionHeavyHitters
+            .keyBy(result -> result.getWindowEnd()) // Key by window end time
+            .reduce(new HeavyHittersReduceFunction(topK));
+        
+        // Write results to Redis
+        aggregatedHeavyHitters.addSink(
+            new RedisHeavyHittersSink(redisHost, redisPort, windowName, dimension));
+    }
+}
+```
+
+### 2.4. Heavy Hitter Window Processing
+
+```java
+public class HeavyHittersWindowFunction 
+        extends ProcessWindowFunction<ItemEvent, WindowedHeavyHitters, String, TimeWindow> {
+    
+    private final int topK;
+    private transient HybridHeavyHitter<String> heavyHitterDetector;
+    
+    public HeavyHittersWindowFunction(int topK) {
+        this.topK = topK;
+    }
+    
+    @Override
+    public void open(Configuration parameters) {
+        // Initialize with reasonable parameters for epsilon (error) and delta (confidence)
+        double epsilon = 0.0001; // 0.01% error
+        double delta = 0.01;     // 99% confidence
+        int maxCounters = topK * 3; // Track 3x more items than needed
+        
+        heavyHitterDetector = new HybridHeavyHitter<>(epsilon, delta, maxCounters, 0.0);
+    }
+    
+    @Override
+    public void process(
+            String dimensionValue,
+            Context context,
+            Iterable<ItemEvent> elements,
+            Collector<WindowedHeavyHitters> out) throws Exception {
+        
+        // Process all events in the window
+        for (ItemEvent event : elements) {
+            heavyHitterDetector.update(event.getItemKey());
+        }
+        
+        // Get heavy hitters
+        List<ItemFrequency<String>> topItems = heavyHitterDetector.getTopK(topK);
+        
+        // Create result object
+        WindowedHeavyHitters result = new WindowedHeavyHitters(
+            context.window().getStart(),
+            context.window().getEnd(),
+            dimensionValue,
+            topItems);
+        
+        out.collect(result);
+    }
+}
+```
+
+### 2.5. Result Aggregation and Storage
+
+```java
+public class HeavyHittersReduceFunction 
+        implements ReduceFunction<WindowedHeavyHitters> {
+    
+    private final int topK;
+    
+    public HeavyHittersReduceFunction(int topK) {
+        this.topK = topK;
+    }
+    
+    @Override
+    public WindowedHeavyHitters reduce(WindowedHeavyHitters value1, WindowedHeavyHitters value2) {
+        // Ensure windows match
+        if (value1.getWindowStart() != value2.getWindowStart() || 
+            value1.getWindowEnd() != value2.getWindowEnd()) {
+            throw new IllegalArgumentException("Cannot combine different windows");
+        }
+        
+        // Combine the frequency maps
+        Map<String, ItemFrequency<String>> combinedFrequencies = new HashMap<>();
+        
+        // Add all items from first result
+        for (ItemFrequency<String> item : value1.getTopItems()) {
+            combinedFrequencies.put(item.getItem(), item);
+        }
+        
+        // Merge with items from second result
+        for (ItemFrequency<String> item : value2.getTopItems()) {
+            String itemKey = item.getItem();
+            if (combinedFrequencies.containsKey(itemKey)) {
+                ItemFrequency<String> existing = combinedFrequencies.get(itemKey);
+                combinedFrequencies.put(itemKey, new ItemFrequency<>(
+                    itemKey,
+                    existing.getEstimatedFrequency() + item.getEstimatedFrequency(),
+                    Math.max(existing.getMaxError(), item.getMaxError())
+                ));
+            } else {
+                combinedFrequencies.put(itemKey, item);
+            }
+        }
+        
+        // Sort and get top K
+        List<ItemFrequency<String>> finalTopItems = combinedFrequencies.values().stream()
+            .sorted((i1, i2) -> Long.compare(i2.getEstimatedFrequency(), i1.getEstimatedFrequency()))
+            .limit(topK)
+            .collect(Collectors.toList());
+        
+        return new WindowedHeavyHitters(
+            value1.getWindowStart(),
+            value1.getWindowEnd(),
+            "aggregated", // This is now an aggregated result
+            finalTopItems);
+    }
+}
+```
+
+### 2.6. Redis Sink Implementation
+
+```java
+public class RedisHeavyHittersSink extends RichSinkFunction<WindowedHeavyHitters> {
+    private final String redisHost;
+    private final int redisPort;
+    private final String windowName;
+    private final String dimension;
+    
+    private transient Jedis jedis;
+    
+    public RedisHeavyHittersSink(String redisHost, int redisPort, String windowName, String dimension) {
+        this.redisHost = redisHost;
+        this.redisPort = redisPort;
+        this.windowName = windowName;
+        this.dimension = dimension;
+    }
+    
+    @Override
+    public void open(Configuration parameters) throws Exception {
+        jedis = new Jedis(redisHost, redisPort);
+    }
+    
+    @Override
+    public void invoke(WindowedHeavyHitters value, Context context) {
+        // Create Redis key for this window and dimension
+        long windowStartEpochMinutes = value.getWindowStart() / (1000 * 60);
+        String redisKey = String.format("topk:%s:%s:%d", windowName, dimension, windowStartEpochMinutes);
+        
+        // Use a transaction to update atomically
+        Transaction transaction = jedis.multi();
+        
+        // Clear any existing data for this key
+        transaction.del(redisKey);
+        
+        // Add items to a sorted set
+        for (ItemFrequency<String> item : value.getTopItems()) {
+            transaction.zadd(redisKey, item.getEstimatedFrequency(), item.getItem());
+            
+            // Store additional item metadata
+            String itemKey = String.format("item:%s:%s", item.getItem(), dimension);
+            transaction.hset(itemKey, "totalCount", String.valueOf(item.getEstimatedFrequency()));
+            transaction.hset(itemKey, "lastSeen", String.valueOf(System.currentTimeMillis()));
+            transaction.hset(itemKey, "errorBound", String.valueOf(item.getMaxError()));
+        }
+        
+        // Store metadata about this result
+        String metaKey = String.format("meta:%s:%s:%d", windowName, dimension, windowStartEpochMinutes);
+        transaction.hset(metaKey, "windowStart", String.valueOf(value.getWindowStart()));
+        transaction.hset(metaKey, "windowEnd", String.valueOf(value.getWindowEnd()));
+        transaction.hset(metaKey, "lastUpdated", String.valueOf(System.currentTimeMillis()));
+        transaction.hset(metaKey, "k", String.valueOf(value.getTopItems().size()));
+        
+        // Set expiration based on window type
+        int ttlSeconds = getTimeToLive(windowName);
+        if (ttlSeconds > 0) {
+            transaction.expire(redisKey, ttlSeconds);
+            transaction.expire(metaKey, ttlSeconds);
+        }
+        
+        // Execute all commands atomically
+        transaction.exec();
+    }
+    
+    @Override
+    public void close() throws Exception {
+        if (jedis != null) {
+            jedis.close();
+        }
+    }
+    
+    private int getTimeToLive(String windowName) {
+        switch (windowName) {
+            case "1-minute": return 60 * 60; // Keep for 1 hour
+            case "1-hour": return 24 * 60 * 60; // Keep for 1 day
+            case "1-day": return 7 * 24 * 60 * 60; // Keep for 1 week
+            default: return -1; // No expiration for global
+        }
+    }
+}
+```
+
+## 3. Global Heavy Hitters Processing
+
+### 3.1. Non-Windowed Processing
+
+```java
+private static void processGlobalHeavyHitters(
+        DataStream<ItemEvent> itemEvents,
+        int topK,
+        String redisHost,
+        int redisPort) {
+    
+    // Process each item type separately
+    for (String itemType : SUPPORTED_ITEM_TYPES) {
+        // Filter for specific item type
+        DataStream<ItemEvent> typedItems = itemEvents
+            .filter(event -> event.getItemType().equals(itemType));
+        
+        // Key by item to distribute processing
+        KeyedStream<ItemEvent, String> keyedByItem = typedItems
+            .keyBy(ItemEvent::getItemKey);
+        
+        // Update item frequency counts
+        DataStream<ItemCount> itemCounts = keyedByItem
+            .process(new ItemCountFunction());
+        
+        // Periodically find global top K
+        DataStream<GlobalHeavyHitters> globalTopK = itemCounts
+            .keyBy(count -> count.getItemType()) // Group by item type
+            .window(TriggeringEventTimeWindows.of(Time.hours(1))) // Trigger every hour
+            .process(new GlobalTopKFunction(topK));
+        
+        // Write global results to Redis
+        globalTopK.addSink(
+            new RedisGlobalHeavyHittersSink(redisHost, redisPort, itemType));
+    }
+}
+```
+
+### 3.2. Stateful Processing Function
+
+```java
+public class ItemCountFunction extends KeyedProcessFunction<String, ItemEvent, ItemCount> {
+    // State for tracking item count
+    private ValueState<Long> countState;
+    
+    @Override
+    public void open(Configuration parameters) {
+        // Register state
+        ValueStateDescriptor<Long> countStateDescriptor =
+            new ValueStateDescriptor<>("item-count", Long.class);
+        countState = getRuntimeContext().getState(countStateDescriptor);
+    }
+    
+    @Override
+    public void processElement(
+            ItemEvent event,
+            Context ctx,
+            Collector<ItemCount> out) throws Exception {
+        
+        // Get current count or initialize
+        Long count = countState.value();
+        if (count == null) {
+            count = 0L;
+        }
+        
+        // Update count
+        count += event.getWeight();
+        countState.update(count);
+        
+        // Output updated count
+        out.collect(new ItemCount(
+            event.getItemKey(),
+            event.getItemType(),
+            count,
+            event.getTimestamp()));
+        
+        // Register timer for periodic updates
+        long currentProcessingTime = ctx.timerService().currentProcessingTime();
+        long nextMinute = (currentProcessingTime / 60000 + 1) * 60000; // Next minute boundary
+        ctx.timerService().registerProcessingTimeTimer(nextMinute);
+    }
+    
+    @Override
+    public void onTimer(long timestamp, OnTimerContext ctx, Collector<ItemCount> out) throws Exception {
+        // Output current count on timer
+        Long count = countState.value();
+        if (count != null) {
+            out.collect(new ItemCount(
+                ctx.getCurrentKey(),
+                "unknown", // Will be set in next operator
+                count,
+                timestamp));
+        }
+    }
+}
+```
+
+## 4. Operational Considerations
+
+### 4.1. Parallelism and Scaling
+
+The Flink job is designed for horizontal scalability:
+
+- **Parallelism Configuration:** Set based on cluster size and throughput requirements
+- **Key-Based Parallelization:** Processing is distributed by item keys
+- **Dynamic Scaling:** Flink supports rescaling during job execution
+
+```java
+// Parallelism configuration
+env.setParallelism(64); // Global parallelism
+
+// Operator-specific parallelism
+parsedEvents
+    .flatMap(new ItemExtractor())
+    .setParallelism(128); // Higher parallelism for CPU-intensive operations
+```
+
+### 4.2. State Management
+
+State management is critical for maintaining heavy hitter information:
+
+- **Checkpointing:** Regular state snapshots for fault tolerance
+- **State Backends:** RocksDB for large state, heap memory for smaller state
+- **State TTL:** Expiration policies for old data
+
+```java
+// Checkpointing configuration
+env.enableCheckpointing(60000); // Every minute
+env.getCheckpointConfig().setMinPauseBetweenCheckpoints(30000); // 30 seconds minimum
+env.getCheckpointConfig().setCheckpointTimeout(120000); // 2 minute timeout
+env.getCheckpointConfig().setMaxConcurrentCheckpoints(1); // One at a time
+env.getCheckpointConfig().setTolerableCheckpointFailureNumber(3); // Allow 3 failures
+
+// State backend configuration
+env.setStateBackend(new RocksDBStateBackend(
+    "s3://topk-heavy-hitters/checkpoints",
+    true)); // Enable incremental checkpoints
+```
+
+### 4.3. Fault Tolerance
+
+The system is designed for resilience:
+
+- **Job Manager HA:** Multiple standby job managers
+- **Task Manager Failure:** Automatic restart with state recovery
+- **Exactly-Once Processing:** Transactional sinks for consistent results
+- **Backpressure Handling:** Controlled processing under load
+
+### 4.4. Performance Tuning
+
+- **Memory Configuration:** Allocate sufficient memory for state
+- **Checkpoint Tuning:** Balance recovery time vs. overhead
+- **Network Buffer Sizing:** Optimize for throughput
+- **GC Tuning:** Minimize garbage collection pauses
+
+## 5. Monitoring and Observability
+
+### 5.1. Flink Metrics
+
+```java
+// Register custom metrics
+public class HeavyHittersWindowFunction 
+        extends ProcessWindowFunction<ItemEvent, WindowedHeavyHitters, String, TimeWindow> {
+    
+    private transient Counter itemsProcessed;
+    private transient Meter itemsPerSecond;
+    private transient Histogram sketchUpdateTime;
+    
+    @Override
+    public void open(Configuration parameters) {
+        // Initialize metrics
+        MetricGroup metricGroup = getRuntimeContext().getMetricGroup().addGroup("heavy-hitters");
+        itemsProcessed = metricGroup.counter("items-processed");
+        itemsPerSecond = metricGroup.meter("throughput", new MeterView(60));
+        sketchUpdateTime = metricGroup.histogram("sketch-update-time", new DropwizardHistogramWrapper(
+            new Histogram(new SlidingTimeWindowReservoir(1, TimeUnit.MINUTES))));
+        
+        // Initialize algorithm
+        // ...
+    }
+    
+    @Override
+    public void process(...) {
+        // Update metrics during processing
+        for (ItemEvent event : elements) {
+            long startTime = System.nanoTime();
+            
+            heavyHitterDetector.update(event.getItemKey());
+            
+            itemsProcessed.inc();
+            itemsPerSecond.markEvent();
+            sketchUpdateTime.update(System.nanoTime() - startTime);
+        }
+        
+        // Process as normal
+        // ...
+    }
+}
+```
+
+### 5.2. External Monitoring
+
+- **Prometheus Integration:** Export Flink metrics to Prometheus
+- **Grafana Dashboards:** Visualize system performance
+- **Alerting:** Define thresholds for critical metrics
+
+## 6. Advanced Patterns
+
+### 6.1. Dynamic Parameter Updates
+
+```java
+public class DynamicParameterFunction extends RichMapFunction<ItemEvent, ItemEvent> {
+    private transient ValueState<HeavyHitterParams> paramsState;
+    private transient ConfigWatcher configWatcher;
+    
+    @Override
+    public void open(Configuration parameters) throws Exception {
+        // Register state for parameters
+        ValueStateDescriptor<HeavyHitterParams> paramsDescriptor =
+            new ValueStateDescriptor<>("heavy-hitter-params", HeavyHitterParams.class);
+        paramsState = getRuntimeContext().getState(paramsDescriptor);
+        
+        // Initialize config watcher (e.g., ZooKeeper, Consul)
+        configWatcher = new ConfigWatcher("heavy-hitters/config");
+        configWatcher.addListener(this::updateParams);
+        configWatcher.start();
+    }
+    
+    private void updateParams(HeavyHitterParams newParams) {
+        try {
+            paramsState.update(newParams);
+        } catch (Exception e) {
+            log.error("Failed to update parameters", e);
+        }
+    }
+    
+    @Override
+    public ItemEvent map(ItemEvent value) throws Exception {
+        // Access current parameters
+        HeavyHitterParams params = paramsState.value();
+        if (params == null) {
+            params = HeavyHitterParams.getDefaults();
+            paramsState.update(params);
+        }
+        
+        // Could modify processing based on parameters
+        // For example, filtering based on dynamic thresholds
+        
+        return value;
+    }
+    
+    @Override
+    public void close() {
+        if (configWatcher != null) {
+            configWatcher.stop();
+        }
+    }
+}
+```
+
+### 6.2. Multi-Tenant Processing
+
+```java
+private static void processMultiTenantHeavyHitters(
+        DataStream<ItemEvent> itemEvents,
+        int defaultTopK,
+        String redisHost,
+        int redisPort) {
+    
+    // Get tenant configuration
+    MapStateDescriptor<String, TenantConfig> tenantConfigDescriptor =
+        new MapStateDescriptor<>("TenantConfig", String.class, TenantConfig.class);
+    
+    BroadcastStream<TenantConfig> tenantConfigStream = env
+        .addSource(new TenantConfigSource())
+        .broadcast(tenantConfigDescriptor);
+    
+    // Connect events with tenant configuration
+    BroadcastConnectedStream<ItemEvent, TenantConfig> connectedStream =
+        itemEvents.connect(tenantConfigStream);
+    
+    // Process with tenant-specific parameters
+    connectedStream
+        .process(new TenantAwareHeavyHitterFunction(defaultTopK))
+        .addSink(new RedisTenantAwareSink(redisHost, redisPort));
+}
+```
+
+## 7. Deployment Topology
+
+### 7.1. Minimum Production Deployment
+
+For handling moderate event volumes (up to 100K events/second):
+
+- **Kafka Cluster:** 3 brokers, 16 partitions per topic
+- **Flink Cluster:**
+  - 1 JobManager (2 for HA)
+  - 3 TaskManagers with 4 slots each (12 total parallelism)
+  - 8GB memory per TaskManager
+- **Redis Cluster:** 3 nodes (1 master, 2 replicas)
+
+### 7.2. Large-Scale Deployment
+
+For handling high event volumes (millions of events/second):
+
+- **Kafka Cluster:** 9+ brokers, 128+ partitions per topic
+- **Flink Cluster:**
+  - 3 JobManagers for HA
+  - 20+ TaskManagers with 8 slots each (160+ total parallelism)
+  - 32GB memory per TaskManager
+- **Redis Cluster:** 6+ shards with 3 nodes each (18+ total nodes)

@@ -1,0 +1,230 @@
+# System Design: Netflix's Distributed Counter
+
+## 1. Introduction & Goals
+
+Netflix processes billions of user interactions daily (e.g., views, likes, plays, impressions). A distributed counter system is essential to track these interactions accurately and efficiently at scale. This system provides insights for personalization, trending content, A/B testing, operational monitoring, and more.
+
+**Goals:**
+*   **Scalability:** Handle massive write throughput (billions of events per day).
+*   **Accuracy:** Provide eventually consistent but accurate counts. For some use cases, near real-time accuracy might be needed regionally.
+*   **High Availability:** The system must be resilient to failures.
+*   **Low Latency:** Writes should be fast to not impact user experience. Read latency for aggregated counts can be higher.
+*   **Flexibility:** Support various types of counters and aggregation dimensions.
+*   **Cost-Effectiveness:** Operate efficiently at scale.
+
+## 2. Requirements
+
+### 2.1. Functional Requirements
+*   **Increment Counter:** Atomically increment a counter for a given key (e.g., `video_id`, `user_id`, `event_type`).
+*   **Get Counter Value:** Retrieve the current value of a counter or a set of counters.
+*   **Support for Dimensions:** Allow counters to be sliced and diced by various dimensions (e.g., country, device type, time window).
+*   **Time-Windowed Counts:** Provide counts for specific time windows (e.g., last minute, hour, day).
+*   **Cardinality Estimation:** For some use cases, estimate the number of unique items (e.g., unique viewers).
+
+### 2.2. Non-Functional Requirements
+*   **Scalability:**
+    *   Writes: Millions of increments per second.
+    *   Reads: Thousands of queries per second for aggregated data.
+    *   Storage: Petabytes of event data and counter states.
+*   **Availability:** Aim for 99.99% availability.
+*   **Durability:** No data loss for committed writes.
+*   **Consistency:**
+    *   **Eventual Consistency** for global aggregated counts.
+    *   **Near Real-time/Stronger Consistency** for regional, best-effort counts if needed for operational dashboards.
+*   **Latency:**
+    *   Write Latency (event ingestion): Tens of milliseconds.
+    *   Read Latency (aggregated data): Seconds to minutes, depending on the freshness requirement.
+*   **Fault Tolerance:** System should tolerate node, zone, and even regional failures.
+*   **Extensibility:** Easy to add new counter types or aggregation rules.
+
+## 3. High-Level Architecture
+
+Netflix employs a hybrid approach, often involving regional processing for speed and global aggregation for comprehensive views.
+
+```
++-----------------+     +---------------------+     +-------------------+
+| Event Sources   | --> | Data Ingestion      | --> | Stream Processing |
+| (Clients, Apps, |     | (e.g., Kafka,       |     | (e.g., Flink,     |
+| Services)       |     | REST APIs)          |     | Spark Streaming)  |
++-----------------+     +---------------------+     +-------------------+
+                                                           |
+                                                           | (Raw/Partially Aggregated Events)
+                                                           v
+                                     +------------------------------------------+
+                                     |         Regional Counter Processing        |
+                                     | +-----------------+  +-----------------+ |
+                                     | | Regional Cache  |  | Regional DB     | |
+                                     | | (e.g., EVCache) |  | (e.g., Cassandra)| |
+                                     | +-----------------+  +-----------------+ |
+                                     +------------------------------------------+
+                                                           |
+                                                           | (Regionally Aggregated Data)
+                                                           v
+                                     +------------------------------------------+
+                                     |          Global Aggregation Service        |
+                                     | +-----------------+  +-----------------+ |
+                                     | | Global Store    |  | Batch Processing| |
+                                     | | (e.g., Cassandra,|  | (e.g., Spark)   | |
+                                     | | S3 Data Lake)   |  +-----------------+ |
+                                     | +-----------------+                      |
+                                     +------------------------------------------+
+                                                           |
+                                                           v
+                                     +------------------------------------------+
+                                     |             Query Service / APIs           |
+                                     | +-----------------+  +-----------------+ |
+                                     | | Reporting Tools |  | Dashboards      | |
+                                     | | Analytics       |  | APIs for Services| |
+                                     | +-----------------+  +-----------------+ |
+                                     +------------------------------------------+
+                                                           ^
+                                                           |
+                                     +------------------------------------------+
+                                     |                Control Plane               |
+                                     | (Counter Definitions, Schema Management)   |
+                                     +------------------------------------------+
+```
+
+**Key Components:**
+1.  **Event Sources:** Client applications, microservices generating countable events.
+2.  **Data Ingestion:** A scalable, durable pipeline (e.g., Kafka) to collect raw events. 
+    Events typically include `event_type`, `event_time`, `dimensions` (key-value pairs), and a `value` (usually 1 for counts).
+3.  **Stream Processing (Regional):**
+    *   Consumes events from the ingestion layer.
+    *   Performs initial, fast, best-effort counting, often in-memory or with a fast regional cache/DB.
+    *   May perform micro-batching or windowed aggregations.
+4.  **Regional Storage:**
+    *   **Cache (e.g., EVCache):** For very hot counters and low-latency regional reads.
+    *   **Database (e.g., Cassandra):** For durable storage of regional counts. Uses LWW semantics with `event_time` as the timestamp.
+5.  **Global Aggregation Service:**
+    *   Periodically collects data from regional stores or a central event stream.
+    *   Performs robust, eventually consistent global aggregation. This might involve batch processing (e.g., Spark) for complex rollups or large time windows.
+6.  **Global Storage:**
+    *   **Primary Counter Store (e.g., Cassandra):** Stores globally aggregated counter values.
+    *   **Data Lake (e.g., S3, Iceberg):** Stores raw or partially processed event data for historical analysis, reprocessing, and batch jobs.
+7.  **Query Service/APIs:** Exposes aggregated counter data to consumers (dashboards, reporting, other services).
+8.  **Control Plane:** A central system for defining new counters, managing their schemas, aggregation rules, and lifecycles.
+
+## 4. Detailed Design
+
+### 4.1. Data Ingestion
+*   **Event Schema:** Standardized event format (e.g., JSON) with fields like `counter_name`, `event_timestamp` (crucial for LWW and ordering), `dimensions` (map of key-value pairs like `country:US`, `device:iOS`), `value` (typically 1).
+*   **Ingestion Layer:** Kafka is a common choice due to its scalability, durability, and partitioning capabilities. 
+Events are partitioned by a key (e.g., `counter_name` or a composite key including some dimensions) to ensure related events go to the same processor for initial aggregation.
+*   **Client-Side Batching:** Clients might batch events before sending to reduce network overhead.
+
+### 4.2. Processing Pipeline
+
+#### 4.2.1. Regional (Fast Path / Real-time Tier)
+*   **Goal:** Provide quick, reasonably accurate counts for operational purposes or recent data.
+*   **Technology:** Stream processors like Apache Flink or Spark Streaming, or custom services.
+*   **Mechanism:**
+    1.  Consume events from Kafka.
+    2.  Perform in-memory aggregation for short time windows (e.g., seconds or minutes).
+    3.  Use techniques like tumbling or sliding windows.
+    4.  Periodically flush aggregated counts to a regional persistent store (e.g., Cassandra) and/or update a regional cache (e.g., EVCache).
+    5.  **LastWriteTs:** When writing to Cassandra, use the `event_timestamp` from the original event with Cassandra's `USING TIMESTAMP` feature to ensure LWW semantics. This helps in correctly merging out-of-order data.
+
+#### 4.2.2. Global (Slow Path / Batch Tier / Accuracy Tier)
+*   **Goal:** Provide highly accurate, eventually consistent global counts.
+*   **Technology:** Batch processing (e.g., Apache Spark) reading from Kafka or a data lake (S3).
+*   **Mechanism:**
+    1.  Processes all events for a given period (e.g., hourly, daily).
+    2.  Can also read from regional Cassandra tables and further aggregate/reconcile.
+    3.  Handles complex rollups, deduplication (if needed, though LWW often handles this implicitly for counts), and correction of any discrepancies from the fast path.
+    4.  Writes final aggregated counts to the global Cassandra store.
+    5.  **Rollup Pipeline:** Data is often rolled up hierarchically:
+        *   Raw events -> Minute counters -> Hour counters -> Day counters.
+        *   The `LastWriteTs` is critical here. A counter (e.g., a specific minute-bucket for a video) is kept in "active rollup circulation" if its `LastWriteTs` indicates it has received new writes that haven't been incorporated into higher-level rollups (e.g., the hourly bucket). The rollup process continues until the aggregated value is up-to-date with the `LastWriteTs`.
+
+### 4.3. Storage
+
+#### 4.3.1. Apache Cassandra
+*   **Why Cassandra?** Excellent write scalability, linear scalability, multi-datacenter replication, tunable consistency, mature.
+*   **Data Model (Example for a generic counter):**
+    *   Table: `counters_by_minute`
+        *   `counter_name` (TEXT, Partition Key)
+        *   `dimensions_hash` (TEXT, Partition Key) - Hash of sorted dimension key-value pairs to allow flexibility.
+        *   `time_bucket` (TIMESTAMP, Clustering Key) - e.g., truncated to the minute.
+        *   `dimension_1_key` (TEXT, Clustering Key / Static Column) - For specific common dimensions if direct querying is needed.
+        *   `dimension_1_value` (TEXT, Clustering Key / Static Column)
+        *   ... (other dimensions)
+        *   `value` (COUNTER) - Cassandra's native counter type.
+        *   `last_write_ts` (BIGINT) - Stores the `event_timestamp` of the latest event contributing to this counter bucket. Updated using `USING TIMESTAMP`.
+
+    *   Table: `counter_dimension_details` (if needing to resolve `dimensions_hash`)
+        *   `dimensions_hash` (TEXT, Partition Key)
+        *   `dimension_key` (TEXT, Clustering Key)
+        *   `dimension_value` (TEXT)
+
+*   **LWW (Last-Write-Wins):** Cassandra's counter type handles concurrent increments. For `last_write_ts` and other metadata, explicit timestamping (`USING TIMESTAMP event_time_from_message`) is used to ensure the record reflects the state based on the actual event occurrence time.
+
+#### 4.3.2. Data Lake (S3 + Table Format like Apache Iceberg)
+*   Stores raw or lightly processed events for:
+    *   Historical analysis.
+    *   Reprocessing in case of errors or logic changes in the pipeline.
+    *   Feeding batch aggregation jobs.
+    *   Ad-hoc querying.
+
+### 4.4. Querying
+*   A dedicated Query Service with APIs.
+*   Reads primarily from the globally aggregated Cassandra tables.
+*   May also query regional stores for near real-time data if required by the use case.
+*   Caching (e.g., Redis, EVCache) at the query layer for frequently accessed aggregated counts.
+*   APIs would allow querying by `counter_name`, `time_range`, and `dimensions`.
+
+### 4.5. Control Plane
+*   Manages metadata about counters:
+    *   `counter_name` registration.
+    *   Schema (expected dimensions, data types).
+    *   Aggregation rules (e.g., sum, unique count approximations like HyperLogLog).
+    *   TTL for different granularities of data.
+    *   Access control.
+*   Allows for dynamic creation and modification of counter configurations without code deployments.
+
+## 5. Scalability & Performance
+
+*   **Horizontal Scaling:** All major components (Kafka, Flink/Spark, Cassandra) scale horizontally.
+*   **Partitioning:** Key to distributing load. Events and Cassandra data are partitioned by `counter_name` and potentially high-cardinality dimensions.
+*   **Caching:** Aggressively used at multiple levels (regional stream processing, query layer).
+*   **Asynchronous Processing:** Decoupling of components via Kafka allows different parts of the system to scale independently.
+*   **Data Pre-aggregation:** Aggregating data at finer granularities (e.g., per minute) reduces the amount of data to be processed for coarser granularities.
+*   **Handling Hotspots:**
+    *   For very popular items (e.g., a viral video), counters can become "hot."
+    *   Techniques:
+        *   Further sharding the hot counter (e.g., `video_123_shard_1`, `video_123_shard_2`).
+        *   Probabilistic counting for less critical hot counters.
+        *   Approximation techniques.
+
+## 6. Fault Tolerance & Reliability
+
+*   **Replication:**
+    *   Kafka topics replicated across brokers.
+    *   Cassandra data replicated across multiple nodes and data centers.
+    *   Stream processing jobs can have standby instances.
+*   **Idempotent Writes:** Processors should be designed to handle message replays from Kafka (e.g., if a processor fails and restarts) without double-counting. LWW with `event_timestamp` helps here.
+*   **Dead Letter Queues (DLQs):** Events that cannot be processed are sent to a DLQ for later inspection.
+*   **Monitoring & Alerting:** Extensive monitoring of all components for performance, errors, and data accuracy.
+*   **Data Reconciliation:** Periodic batch jobs can compare regional vs. global counts or reprocess data from the data lake to ensure accuracy.
+
+## 7. Consistency Model
+
+*   **Writes (Event Ingestion):** Durable once accepted by Kafka.
+*   **Regional Counts:** Can be strongly consistent within the region if using appropriate Cassandra settings and cache updates, but generally aimed for low latency best-effort.
+*   **Global Counts:** Eventually consistent. There's a delay (minutes to hours) for events to propagate and be included in global aggregates.
+*   **Accuracy:** The `LastWriteTs` mechanism and robust rollup pipelines are key to achieving high eventual accuracy.
+
+## 8. Key Challenges & Solutions
+
+*   **Cardinality of Dimensions:** A large number of unique dimension combinations can lead to an explosion in the number of distinct counters.
+    *   **Solution:** Careful schema design, limiting cardinality where possible, using `dimensions_hash`, or specialized solutions for very high cardinality dimensions (e.g., storing them as blobbed JSON in Cassandra and processing during reads or batch jobs).
+*   **Out-of-Order Events:** Common in distributed systems.
+    *   **Solution:** Using `event_timestamp` with LWW semantics in Cassandra. Stream processors can also use watermarking to handle late data.
+*   **Exactly-Once Semantics (EOS):** Difficult to achieve end-to-end.
+    *   **Solution:** Aim for at-least-once processing with idempotent consumers. Cassandra's counter type is idempotent. LWW helps make updates idempotent based on `event_timestamp`.
+*   **Schema Evolution:** Counter definitions or dimensions might change.
+    *   **Solution:** Control plane manages schema versions. Data pipelines need to be designed to handle different schema versions or provide transformation capabilities.
+*   **Cost Management:** Storing and processing vast amounts of data is expensive.
+    *   **Solution:** Tiered storage (hot/warm/cold), aggressive rollups, data sampling for non-critical analytics, efficient data encodings.
+
+This design provides a robust, scalable, and fault-tolerant system for handling distributed counters at Netflix's scale.

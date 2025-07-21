@@ -1,0 +1,386 @@
+# System Design: Top K Heavy Hitters
+
+**Version:** 1.0
+**Last Updated:** {{CurrentDate}}
+
+## 1. Introduction and Problem Definition
+
+The "Top K Heavy Hitters" problem, also known as the "frequent items" or "hot items" problem, 
+involves identifying the K most frequent items in a massive data stream or a very large dataset. 
+The challenge lies in doing this efficiently, often with limited memory, and in real-time or 
+near real-time for streaming data.
+
+**Significance:**
+Identifying heavy hitters is crucial in various domains:
+- **Network Monitoring:** Identifying IP addresses sending/receiving the most traffic, 
+or most frequently accessed URLs.
+- **E-commerce:** Finding top-selling products, most viewed items, or popular search queries.
+- **Social Media:** Detecting trending topics, hashtags, or influential users.
+- **Security:** Spotting sources of DDoS attacks or frequent failed login attempts.
+- **Database Systems:** Optimizing query performance by identifying frequently accessed data.
+
+**Challenges:**
+- **Scale:** The dataset or stream can be enormous (terabytes or petabytes), 
+    making it impossible to store all item counts explicitly.
+- **Velocity:** For streaming data, items arrive rapidly, requiring fast processing.
+- **Memory Constraints:** Algorithms often need to operate within strict memory limits.
+- **Accuracy:** Exact solutions can be resource-intensive, so approximate solutions with error bounds 
+    are often acceptable.
+- **Distributed Nature:** Data might be spread across multiple sources or processed in a distributed environment.
+
+## 2. Requirements
+
+### 2.1. Functional Requirements
+
+1.  **Identify Top K Items:** The system must identify the K items with the highest frequencies from the input data stream/dataset.
+2.  **Configurable K:** The value of K should be configurable.
+3.  **Support for Various Item Types:** The system should be able to handle different types of items (e.g., strings, integers, complex objects represented by a unique ID).
+4.  **Frequency Estimation:** For each identified heavy hitter, the system should provide an estimated frequency.
+5.  **Time Windowing (Optional for Streaming):** For streaming data, the system might need to find heavy hitters 
+    within specific time windows (e.g., last 5 minutes, last hour).
+6.  **Query Interface:** Provide an API to retrieve the current Top K heavy hitters and their estimated frequencies.
+
+### 2.2. Non-Functional Requirements
+
+1.  **High Scalability:** The system must handle a massive volume and velocity of data.
+2.  **High Availability:** The system should be resilient to failures and remain operational.
+3.  **Low Latency:** For streaming applications, identifying heavy hitters should happen in near real-time.
+4.  **Memory Efficiency:** The algorithms used must be space-efficient.
+5.  **Accuracy:** The system should provide reasonably accurate frequency estimates. 
+    If approximate, error bounds should be well-defined and tunable.
+6.  **Fault Tolerance:** The system should be able to recover from partial failures without losing significant state or accuracy.
+7.  **Durability (for counts):** Estimated counts and identified heavy hitters should be persistable.
+8.  **Monitoring & Alerting:** The system should have mechanisms to monitor its health, performance, and accuracy.
+
+## 3. System Design Considerations & Estimations
+
+### 3.1. Estimations (Example Scenario: Network Traffic Analysis)
+
+-   **Data Ingestion Rate:** 1 million events/second per processing node.
+-   **Item Cardinality (Unique Items):** Potentially billions (e.g., unique IP addresses, URLs).
+-   **Size of K:** Typically 10 to 1000.
+-   **Event Size:** ~100 bytes per event (e.g., log line containing source IP, destination IP, URL).
+-   **Data Volume per day:** 1M events/sec * 100 bytes/event * 86400 sec/day = ~8.64 TB/day per node.
+-   **Memory per Node for Sketching:** 100 MB - 1 GB (configurable based on accuracy needs).
+-   **Query Rate for Top K:** 100s of QPS.
+-   **Latency for Top K Query:** < 1 second.
+
+### 3.2. Key Design Choices & Trade-offs
+
+-   **Exact vs. Approximate Algorithms:**
+    -   **Exact:** Requires storing all counts (e.g., using a hash map). Feasible only for small cardinality or if memory is abundant. 
+        Not suitable for massive streams.
+    -   **Approximate:** Uses probabilistic data structures (sketches) to estimate counts within limited memory. 
+    Introduces some error but is highly scalable.
+-   **Centralized vs. Distributed Processing:**
+    -   **Centralized:** Simpler to manage but limited by the capacity of a single machine.
+    -   **Distributed:** Essential for handling large-scale data. Requires mechanisms for data partitioning, aggregation, and coordination.
+-   **Batch vs. Stream Processing:**
+    -   **Batch:** Processes data in large chunks. Suitable if real-time results are not critical.
+    -   **Stream:** Processes data as it arrives. Necessary for low-latency applications.
+-   **Choice of Sketching Algorithm:** Different algorithms (Count-Min Sketch, Misra-Gries, Space-Saving) 
+    offer different trade-offs in terms of accuracy, memory usage, and update/query speed.
+    
+
+## 4. High-Level Architecture
+
+```
++-----------------+      +---------------------+      +----------------------+
+| Data Sources    |----->| Data Ingestion      |----->| Stream Processing    |
+| (e.g., Logs,    |      | (e.g., Kafka,       |      | (e.g., Flink, Spark  |
+| Network Taps)   |      | Kinesis, Fluentd)   |      | Streaming, Custom)   |
++-----------------+      +---------------------+      +----------+-----------+
+                                                            | (Heavy Hitter Algo)
+                                                            v
+                                                      +----------------------+
+                                                      | Sketch/State Storage |
+                                                      | (e.g., Redis, RocksDB|
+                                                      | In-Memory DB)        |
+                                                      +----------+-----------+
+                                                                 |
+                                                                 v
++-----------------+      +---------------------+      +----------------------+
+| Query/API Layer |<-----| Aggregation &       |<-----| Results Aggregator   |
+| (e.g., REST API)|      | Presentation Service|      | (If Distributed)     |
++-----------------+      +---------------------+      +----------------------+
+         ^
+         |
++-----------------+
+| Monitoring &    |
+| Alerting        |
++-----------------+
+```
+
+**Components:**
+1.  **Data Sources:** Generate the raw data stream (e.g., web server logs, network packets, application events).
+2.  **Data Ingestion:** Collects data from various sources and reliably feeds it into the processing pipeline (e.g., Kafka, Kinesis).
+3.  **Stream Processing Engine:** Consumes data from the ingestion layer and applies the heavy hitter detection algorithm. This could be a general-purpose stream processor (Flink, Spark Streaming) or a custom-built service.
+4.  **Sketch/State Storage:** Stores the probabilistic data structures (sketches) or intermediate counts. This needs to be fast and potentially distributed.
+5.  **Results Aggregator (for distributed setup):** If processing is distributed, this component collects partial results (local heavy hitters) from different processing nodes and merges them to find global heavy hitters.
+6.  **Aggregation & Presentation Service:** Queries the sketch/state storage (or results aggregator) 
+to retrieve the Top K items and their frequencies. It may perform final calculations and formatting.
+7.  **Query/API Layer:** Exposes an interface (e.g., REST API) for users or other systems to request the Top K heavy hitters.
+8.  **Monitoring & Alerting:** Tracks system health, performance metrics (latency, throughput), and algorithm accuracy.
+
+## 5. Algorithmic Approaches
+
+Several algorithms can find Top K heavy hitters, primarily differing in their memory usage, accuracy guarantees, and complexity.
+
+### 5.1. Exact Counting (Hash Map)
+-   **How it works:** Maintain a hash map where keys are items and values are their counts. Increment count for each incoming item.
+-   **Pros:** 100% accuracy.
+-   **Cons:** Memory usage is proportional to the number of unique items (cardinality). Impractical for high cardinality streams.
+-   **Use Case:** Small datasets or when exact counts are absolutely necessary and memory is not a constraint.
+
+### 5.2. Misra-Gries Summary Algorithm
+-   **How it works:** Maintains K-1 counters (or K counters depending on variant). When a new item arrives:
+    1.  If the item is already monitored, increment its counter.
+    2.  If not monitored and there's a free counter, assign the item to it with count 1.
+    3.  If not monitored and no free counter, decrement all existing K-1 counters. If a counter reaches 0, it becomes free and the item associated with it is no longer monitored.
+-   **Output:** Items remaining in the counters are candidates for heavy hitters. Their counts are underestimates.
+-   **Guarantees:** Any item with true frequency `f > N/K` (where N is total items seen) will be in the summary. The estimated frequency `f_est` for an item in the summary satisfies `f - N/K <= f_est <= f`.
+-   **Pros:** Simple to implement, strong guarantees, deterministic.
+-   **Cons:** Can underestimate frequencies significantly. Requires a second pass over data for exact frequencies if needed (not feasible for streams).
+-   **Memory:** `O(K)` space for counters.
+
+### 5.3. Frequent Algorithm (Majority Algorithm generalization / Demaine et al.)
+-   Similar to Misra-Gries, often referred to as such. It's a one-pass streaming algorithm.
+-   Maintains `k-1` (item, count) pairs.
+-   When a new item `x` arrives:
+    -   If `x` is one of the `k-1` items, increment its count.
+    -   Else if there are fewer than `k-1` items, add `(x, 1)`.
+    -   Else (all `k-1` slots full, `x` is new), decrement all counts. Remove pairs with count 0.
+-   **Guarantees:** Any item with frequency `> N/k` is reported. Reported frequencies are underestimates.
+
+### 5.4. Count-Min Sketch (CMS)
+-   **How it works:** Uses a 2D array (sketch) of `d` rows and `w` columns (counters). 
+`d` hash functions map items to one counter in each row.
+    -   **Update:** For an incoming item, hash it `d` times. Increment the corresponding `d` counters `sketch[i][hash_i(item)]`.
+    -   **Query (Estimate Frequency):** For an item, hash it `d` times. Return the minimum of the `d` counters `min(sketch[i][hash_i(item)])`.
+-   **Pros:** Probabilistic, very space-efficient, fast updates and queries. Provides overestimation guarantees.
+-   **Cons:** Frequencies are overestimates due to hash collisions. Accuracy depends on `w` (width) and `d` (depth) of the sketch.
+-   **Memory:** `O(d * w)` space. Error is proportional to `N/w`, probability of error decreases with `d`.
+-   **Error Bounds:** Estimated count `f_est` is `f <= f_est <= f + εN` with probability `1-δ`, where `ε = e/w` and `δ = 1/e^d` (e is Euler's number).
+
+### 5.5. Count-Mean-Min Sketch (CMM Sketch)
+-   A variation of CMS that attempts to reduce the overestimation bias by subtracting an estimated noise term.
+-   Can provide better accuracy in some scenarios.
+
+### 5.6. Space-Saving Algorithm
+-   **How it works:** Maintains `m` (typically `K` or slightly more) item-count pairs in a data structure (e.g., min-heap or sorted list based on counts).
+    1.  If incoming item `x` is monitored, increment its count.
+    2.  If `x` is not monitored and there are fewer than `m` items, add `(x, 1)`.
+    3.  If `x` is not monitored and structure is full ( `m` items):
+        -   Replace the item with the minimum count (`min_item`) with `x`.
+        -   Set count of `x` to `count(min_item) + 1`.
+        -   The count of `min_item` becomes the guaranteed underestimate for `x`.
+-   **Pros:** Generally more accurate than Misra-Gries for the same memory. Provides both overestimates (current count) and underestimates (count of item it replaced).
+-   **Cons:** More complex to implement efficiently than Misra-Gries or CMS.
+-   **Memory:** `O(K)` space.
+-   **Guarantees:** Any item with frequency `f > N/m` will be in the summary. The estimated frequency `f_est` for an item `i` in the summary satisfies `f_true(i) - N/m <= f_est(i) <= f_true(i)` (if `f_est` is the count when it was inserted/incremented after replacing `min_item`). The stored count is an overestimate.
+
+### 5.7. Lossy Counting
+-   **How it works:** Divides the stream into windows of size `1/ε` (where `ε` is error parameter).
+-   At window boundaries, decrement all counts by 1 and remove items with count 0.
+-   **Pros:** Simple, good for finding items with frequency `> sN` (where `s` is support threshold).
+-   **Cons:** Error can be up to `εN`.
+
+### Algorithm Choice Summary:
+
+| Algorithm         | Memory    | Type         | Error Type    | Key Characteristic                               |
+|-------------------|-----------|--------------|---------------|--------------------------------------------------|
+| Hash Map          | `O(Unique)`| Exact        | None          | Only for small cardinality                       |
+| Misra-Gries       | `O(K)`    | Deterministic| Underestimate | Strong `N/K` guarantee                           |
+| Count-Min Sketch  | `O(dw)`   | Probabilistic| Overestimate  | Very space-efficient, tunable error/probability  |
+| Space-Saving      | `O(K)`    | Deterministic| Overestimate  | Good accuracy, maintains `K` items               |
+| Lossy Counting    | `O(1/ε)`  | Deterministic| Underestimate | Good for threshold-based frequency counting      |
+
+**Recommendation:** For general-purpose, high-performance heavy hitter detection in streams, 
+**Count-Min Sketch** is often a good starting point due to its space efficiency and speed. 
+**Space-Saving** is excellent if higher accuracy for the top K is needed and slightly more complexity is acceptable. 
+Misra-Gries is simpler but might not be as accurate.
+
+## 6. Detailed System Components
+
+### 6.1. Data Ingestion Layer
+-   **Technologies:** Apache Kafka, AWS Kinesis, Google Cloud Pub/Sub, Fluentd.
+-   **Responsibilities:**
+    -   Reliably collect data from diverse sources.
+    -   Buffer data to handle bursts and decouple producers from consumers.
+    -   Provide data partitioning for parallel processing (e.g., Kafka topics partitioned by item hash or round-robin).
+-   **Considerations:** Throughput, latency, durability, ordering guarantees (per partition).
+
+### 6.2. Stream Processing Layer
+-   **Technologies:** Apache Flink, Apache Spark Streaming, Kafka Streams, custom Akka/Java/Go application.
+-   **Responsibilities:**
+    -   Consume data from the ingestion layer.
+    -   Extract relevant items from events.
+    -   Apply the chosen heavy hitter algorithm (e.g., update CMS or Space-Saving structure).
+    -   Manage the state of the sketch/summary.
+    -   Handle windowing if required.
+-   **State Management:**
+    -   The sketch itself is the primary state.
+    -   For Flink/Spark, use their managed state backends (e.g., RocksDB) for fault tolerance and scalability.
+    -   For custom apps, consider Redis, an embedded DB like RocksDB, or a distributed in-memory store.
+-   **Parallelism:** Process partitions of the input stream in parallel across multiple tasks/nodes.
+    -   Each processing task can maintain its own local sketch.
+    -   Periodically, local sketches need to be merged or queried to get global heavy hitters.
+
+### 6.3. Sketch/State Storage
+-   **If using Flink/Spark Streaming:** Their internal state management is often sufficient (e.g., RocksDB backend for Flink).
+-   **If custom stream processor or for global sketch:**
+    -   **Redis:** Fast key-value store. Can store CMS bit arrays or sorted sets for Space-Saving.
+    -   **In-Memory Database (e.g., Hazelcast, Apache Ignite):** For distributed, low-latency access to sketches.
+    -   **Persistent Storage (e.g., Cassandra, ScyllaDB):** If sketches need to be very large and durable beyond memory capacity, though this increases latency.
+-   **Considerations:** Access latency, throughput, consistency, durability, scalability.
+
+### 6.4. Results Aggregator (for Distributed Setup)
+-   **If each processing node has a local sketch (e.g., local CMS):**
+    1.  Periodically, each node sends its local Top-K candidates (or the full local sketch if small enough) to a central aggregator.
+    2.  The aggregator merges these: 
+        -   For CMS: Sum up the sketches (element-wise addition of counter arrays if dimensions match). Then query the merged sketch.
+        -   For Misra-Gries/Space-Saving: Collect all candidate items from local summaries. Re-evaluate their frequencies against a global sketch or by summing their local estimated counts (this requires careful handling of error propagation).
+-   **Alternative for CMS:** A simpler approach for distributed CMS is to have all nodes update a shared, distributed CMS (e.g., stored in Redis using `BITFIELD` or `INCRBY` on specific indices). This requires careful coordination or accepting some race conditions if updates are not atomic across the sketch structure.
+-   **Responsibilities:** Combine partial results, resolve discrepancies, compute global Top K.
+
+### 6.5. Aggregation & Presentation Service
+-   **Responsibilities:**
+    -   Receives query requests for Top K items.
+    -   Queries the relevant sketch(es) or the aggregator.
+        -   For CMS: Iterate through candidate items (can be pre-selected or all items seen if feasible, or use techniques like heavy-hitters from sketch itself) and query their estimated frequencies.
+        -   For Space-Saving: The structure directly holds the Top K candidates.
+    -   Formats the results (item, estimated_frequency).
+    -   Potentially caches results for frequent queries.
+-   **Technology:** Standard backend service (e.g., Spring Boot, Python Flask/Django, Node.js).
+
+### 6.6. Query/API Layer
+-   **Interface:** Typically a REST API (e.g., `GET /topk?k=10&window=5m`).
+-   **Parameters:** `k`, time window, filters (e.g., item type).
+-   **Authentication/Authorization:** Secure access to the API.
+-   **Rate Limiting:** Protect the service from abuse.
+
+## 7. Scalability & Performance
+
+### 7.1. Data Ingestion
+-   Use scalable message queues like Kafka, partitioned for parallel consumption.
+-   Scale out ingestion brokers and consumer groups.
+
+### 7.2. Stream Processing
+-   **Horizontal Scaling:** Increase the number of processing nodes/tasks.
+    -   Partition input data stream (e.g., by item hash, or round-robin if items are not known beforehand for partitioning).
+    -   Each processor handles a subset of the data and maintains a local sketch.
+-   **Efficient Sketch Operations:** Ensure chosen sketch algorithm has fast update and query times (`O(1)` or `O(log K)` for CMS, `O(log K)` for Space-Saving with heap).
+-   **Memory Management:** Carefully tune sketch parameters (`w`, `d` for CMS; `m` for Space-Saving) to balance accuracy and memory footprint.
+
+### 7.3. State Management
+-   If using distributed sketches (e.g., CMS in Redis), ensure the storage can handle the concurrent update/query load.
+-   Use appropriate data structures in Redis (e.g., `BITFIELD` for CMS counters if they fit, or Lua scripts for atomic updates to multiple keys).
+
+### 7.4. Aggregation
+-   The aggregator can become a bottleneck if many processing nodes report frequently.
+-   Consider hierarchical aggregation: groups of nodes report to intermediate aggregators, which then report to a global aggregator.
+-   Optimize data transfer: send only necessary information (e.g., items exceeding a local threshold).
+
+### 7.5. Caching
+-   Cache Top K results at the Presentation Service or API layer, especially if queries are frequent and data doesn't change hyper-dynamically.
+-   Set appropriate TTLs for cached data based on desired freshness.
+
+## 8. Fault Tolerance & Reliability
+
+### 8.1. Data Ingestion
+-   Kafka/Kinesis provide data replication and durability.
+-   Ensure consumer acknowledgments are handled correctly to prevent data loss upon consumer failure.
+
+### 8.2. Stream Processing
+-   **Checkpointing:** Periodically save the state of sketches to persistent storage (e.g., HDFS, S3, RocksDB managed by Flink/Spark).
+-   **Replay:** Upon failure, a new processing instance can restore state from the latest checkpoint and reprocess data from the ingestion layer (from the offset corresponding to the checkpoint).
+-   **Redundancy:** Run multiple instances of processing tasks. Stream processing frameworks like Flink handle this automatically.
+
+### 8.3. State Storage
+-   If using external state stores like Redis, use their clustering and replication features (e.g., Redis Sentinel/Cluster).
+
+### 8.4. Aggregation Service
+-   Make the aggregation service stateless if possible, or ensure its state is replicated/recoverable.
+-   Use leader election if a single aggregator instance is active.
+
+## 9. Accuracy Considerations
+
+-   **Algorithm Choice:** As discussed, different algorithms offer different accuracy guarantees.
+-   **Parameter Tuning:** For CMS, `w` (width) and `d` (depth) are critical. Larger `w` reduces overestimation error. Larger `d` reduces the probability of large errors.
+    -   `w = ceil(e/ε)` where `ε` is the desired error factor (e.g., 0.001 for 0.1% of total count N).
+    -   `d = ceil(ln(1/δ))` where `δ` is the desired error probability.
+-   **For Space-Saving:** `m` (number of counters) determines accuracy. `m = 1/ε` guarantees error `εN`.
+-   **Monitoring Accuracy:** If ground truth is available for samples or historical data, periodically compare sketch estimates against actual counts to validate accuracy and adjust parameters.
+-   **False Positives/Negatives:**
+    -   CMS can have false positives (reporting an item as heavy hitter when it's not, due to overestimation).
+    -   Misra-Gries can have false negatives (failing to report an item that is a heavy hitter but whose true frequency is close to the `N/K` threshold).
+
+## 10. Monitoring & Alerting
+
+-   **System Metrics:**
+    -   Ingestion rate, processing rate, end-to-end latency.
+    -   CPU, memory, network, disk I/O usage for all components.
+    -   Queue lengths in Kafka/Kinesis.
+    -   Error rates, task failures, restart counts.
+-   **Algorithm-Specific Metrics:**
+    -   Sketch size, number of items tracked.
+    -   Estimated error rates (if models exist).
+    -   Frequency of sketch merges or state checkpoints.
+-   **Alerts:**
+    -   High latency or error rates.
+    -   System components down.
+    -   Critical resource exhaustion (memory, disk).
+    -   Significant deviation in accuracy if measurable.
+-   **Tools:** Prometheus, Grafana, ELK Stack (Elasticsearch, Logstash, Kibana), Datadog, New Relic.
+
+## 11. Advanced Topics & Extensions
+
+### 11.1. Distributed Heavy Hitters
+-   **Problem:** Data is inherently distributed across many nodes, and we need global heavy hitters without sending all data to one place.
+-   **Solutions:**
+    -   **Local Sketches + Aggregation:** Each node computes a local sketch. Sketches are sent to an aggregator. (CMS sketches are mergeable by summing counter arrays).
+    -   **Hierarchical Aggregation:** For very large systems, use multiple levels of aggregation.
+    -   **Randomized Sampling + Coordination:** Nodes sample data and coordinate to find global candidates.
+
+### 11.2. Weighted Heavy Hitters
+-   Items have associated weights, and we want Top K by sum of weights instead of raw frequency.
+-   Most sketch algorithms can be adapted by incrementing counters by the item's weight instead of by 1.
+
+### 11.3. Time-Decaying Heavy Hitters / Sliding Window
+-   Give more importance to recent items.
+-   **Sliding Window:** Maintain sketches for fixed-size sliding windows. Requires subtracting sketches of expiring windows (possible with CMS if counts are positive).
+-   **Exponential Decay:** Multiply all counts in the sketch by a decay factor `(1-α)` periodically or incorporate decay into updates.
+
+### 11.4. Finding Heavy Hitters with Deletions (Turnstile Model)
+-   Items can be added or removed from the set.
+-   Requires sketch algorithms that support decrements (e.g., standard CMS, Count Sketch). Misra-Gries and basic Space-Saving are for insertion-only streams.
+
+## 12. Use Cases (Revisited with Algorithm Mapping)
+
+-   **Network Traffic Monitoring (Top Talkers/URLs):**
+    -   Data: Netflow, IPFIX, web server logs.
+    -   Algorithm: Count-Min Sketch (for high speed, large cardinality), Space-Saving (for better accuracy on top items).
+    -   Scale: Very high, distributed.
+-   **Trending Topics on Social Media:**
+    -   Data: Tweets, posts, hashtags.
+    -   Algorithm: Space-Saving (good for tracking a dynamic set of top items), potentially with time decay.
+    -   Scale: High, real-time.
+-   **E-commerce Bestsellers:**
+    -   Data: Sales transactions, product views.
+    -   Algorithm: Misra-Gries (if simplicity is key and `K` is small relative to total sales), Space-Saving, or even exact counts if aggregated over longer periods (e.g., daily batch).
+-   **Anomaly Detection (e.g., DDoS):**
+    -   Data: Network requests, login attempts.
+    -   Algorithm: Count-Min Sketch to quickly identify sudden spikes in frequency for specific IPs/users.
+
+## 13. Conclusion
+
+The Top K Heavy Hitters problem is fundamental in big data analytics. Choosing the right approach involves balancing accuracy, memory, processing speed, and system complexity. Approximate algorithms, particularly sketches like Count-Min Sketch and Space-Saving, provide scalable and efficient solutions for massive data streams.
+
+A robust system requires careful design of data ingestion, stream processing, state management, and query layers, along with considerations for scalability, fault tolerance, and monitoring. The specific choice of algorithms and architecture will depend on the precise requirements of the application (e.g., error tolerance, real-time needs, data volume).
+
+## 14. Future Work / Open Questions
+
+-   Adaptive sketch sizing based on observed data characteristics.
+-   More sophisticated error correction techniques for sketches.
+-   Combining multiple sketch types for different aspects of analysis.
+-   Privacy-preserving heavy hitter detection (e.g., using differential privacy techniques with sketches).

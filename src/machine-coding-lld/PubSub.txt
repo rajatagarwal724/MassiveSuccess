@@ -1,0 +1,188 @@
+package lld.pubsub;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.function.Consumer;
+
+/**
+ * Thread-safe in-memory Pub-Sub library (single-process) with:
+ *  • Multiple topics, publishers, subscribers
+ *  • Parallel publish (non-blocking to producers)
+ *  • Per-consumer offset tracking + reset/replay
+ *  • Topic retention (time-based) with background purger
+ *  • Visibility APIs (lag, lastOffset)
+ */
+public class PubSubDemo {
+    public static void main(String[] args) throws InterruptedException {
+        Broker broker = Broker.INSTANCE;
+        broker.createTopic("orders", Duration.ofSeconds(30));
+
+        // publisher threads
+        ExecutorService pubPool = Executors.newFixedThreadPool(2);
+        Runnable publisherTask = () -> {
+            for (int i = 1; i <= 5; i++) {
+                broker.publish("orders", "order-" + i);
+                sleep(200);
+            }
+        };
+        pubPool.submit(publisherTask);
+        pubPool.submit(publisherTask);
+
+        // consumer
+        Subscriber sub1 = broker.createSubscriber("orders", "c1");
+        Subscriber sub2 = broker.createSubscriber("orders", "c2");
+        sub1.start(msg -> System.out.println("C1 got: " + msg.getPayload()));
+        sub2.start(msg -> System.out.println("C2 got: " + msg.getPayload()));
+
+        pubPool.shutdown();
+        pubPool.awaitTermination(5, TimeUnit.SECONDS);
+
+        Thread.sleep(1000);
+        System.out.println("--- Visibility ---");
+        broker.topicStatus("orders").forEach((cid, lag) ->
+                System.out.printf("consumer=%s lag=%d\n", cid, lag));
+
+        System.out.println("Resetting C2 offset to 0 (replay)");
+        sub2.resetOffset(0);
+
+        Thread.sleep(1000);
+        broker.shutdown();
+    }
+
+    private static void sleep(long ms) { try { Thread.sleep(ms); } catch (InterruptedException ignored) {} }
+}
+
+// ==================== BROKER ====================
+enum Broker { INSTANCE; // singleton
+    private final Map<String, Topic> topics = new ConcurrentHashMap<>();
+    private final ExecutorService dispatcher = Executors.newCachedThreadPool();
+
+    public void createTopic(String name, Duration retention) {
+        topics.computeIfAbsent(name, t -> new Topic(name, retention));
+    }
+
+    public void deleteTopic(String name) {
+        Topic t = topics.remove(name);
+        if (t != null) t.shutdown();
+    }
+
+    public void publish(String topic, String payload) {
+        Topic t = topics.get(topic);
+        if (t == null) throw new IllegalArgumentException("Topic not found");
+        dispatcher.execute(() -> t.addMessage(payload)); // async publish
+    }
+
+    public Subscriber createSubscriber(String topic, String consumerId) {
+        Topic t = topics.get(topic);
+        if (t == null) throw new IllegalArgumentException("Topic not found");
+        return t.addSubscriber(consumerId);
+    }
+
+    public Map<String, Long> topicStatus(String topic) {
+        Topic t = topics.get(topic);
+        return t == null ? Map.of() : t.getLagPerConsumer();
+    }
+
+    public void shutdown() {
+        dispatcher.shutdownNow();
+        topics.values().forEach(Topic::shutdown);
+    }
+}
+
+// ==================== TOPIC ====================
+class Topic {
+    private final String name;
+    private final Duration retention;
+    private final List<Message> log = new CopyOnWriteArrayList<>();
+    private final AtomicLong nextOffset = new AtomicLong(0);
+    private final Map<String, Subscriber> subscribers = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService purger = Executors.newSingleThreadScheduledExecutor();
+
+    Topic(String name, Duration retention) {
+        this.name = name;
+        this.retention = retention;
+        // periodic purge task
+        purger.scheduleAtFixedRate(this::purgeExpired, retention.toSeconds(), retention.toSeconds(), TimeUnit.SECONDS);
+    }
+
+    void addMessage(String payload) {
+        Message m = new Message(nextOffset.getAndIncrement(), payload, Instant.now());
+        log.add(m);
+    }
+
+    Subscriber addSubscriber(String consumerId) {
+        return subscribers.computeIfAbsent(consumerId, cid -> new Subscriber(cid, this));
+    }
+
+    List<Message> readFromOffset(long offset) {
+        if (offset >= log.size()) return List.of();
+        return log.subList((int) offset, log.size());
+    }
+
+    long lastOffset() { return nextOffset.get() - 1; }
+
+    void purgeExpired() {
+        Instant cutoff = Instant.now().minus(retention);
+        int idx = 0;
+        while (idx < log.size() && log.get(idx).timestamp().isBefore(cutoff)) idx++;
+        if (idx > 0) log.subList(0, idx).clear();
+    }
+
+    Map<String, Long> getLagPerConsumer() {
+        long last = lastOffset();
+        Map<String, Long> map = new HashMap<>();
+        subscribers.forEach((cid, sub) -> map.put(cid, Math.max(0, last - sub.getOffset())));
+        return map;
+    }
+
+    void shutdown() { purger.shutdownNow(); }
+
+    @Override public String toString() { return "Topic{" + name + '}'; }
+}
+
+// ==================== SUBSCRIBER ====================
+class Subscriber {
+    private final String id;
+    private final Topic topic;
+    private final ExecutorService exec = Executors.newSingleThreadExecutor();
+    private final AtomicLong offset = new AtomicLong(0);
+    private volatile boolean running = false;
+
+    Subscriber(String id, Topic topic) { this.id = id; this.topic = topic; }
+
+    public void start(Consumer<Message> handler) {
+        if (running) return;
+        running = true;
+        exec.submit(() -> {
+            while (running) {
+                try {
+                    List<Message> list = topic.readFromOffset(offset.get());
+                    if (list.isEmpty()) { Thread.sleep(100); continue; }
+                    for (Message m : list) {
+                        try { handler.accept(m); } catch (Exception e) { e.printStackTrace(); }
+                        offset.incrementAndGet();
+                    }
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                } catch (Exception e) { e.printStackTrace(); }
+            }
+        });
+    }
+
+    public void stop() { running = false; exec.shutdownNow(); }
+
+    public long getOffset() { return offset.get(); }
+
+    // Bonus-1: reset offset & replay
+    public void resetOffset(long newOffset) { offset.set(newOffset); }
+
+    @Override public String toString() { return "Subscriber{" + id + "}"; }
+}
+
+// ==================== MESSAGE ====================
+record Message(long offset, String payload, Instant timestamp) {
+    public String getPayload() { return payload; }
+}

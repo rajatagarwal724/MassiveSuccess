@@ -1,0 +1,501 @@
+```java
+package lld.KeyValue;
+
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
+
+/**
+ * An in-memory key-value store with transaction support.
+ * This implementation provides optimistic concurrency control for handling
+ * concurrent transactions on the same data.
+ */
+public class InMemoryKeyValueStore {
+    // Main storage for key-value pairs
+    private Map<String, VersionedValue> data = new HashMap<>();
+    
+    // Thread-local transaction context
+    private ThreadLocal<Transaction> currentTransaction = ThreadLocal.withInitial(() -> null);
+    
+    // Global version counter for optimistic concurrency control
+    private AtomicLong globalVersion = new AtomicLong(0);
+    
+    // Set of keys being watched in the current transaction
+    private ThreadLocal<Set<String>> watchedKeys = ThreadLocal.withInitial(HashSet::new);
+    
+    /**
+     * Represents a value with version information for concurrency control
+     */
+    private static class VersionedValue {
+        String value;
+        long version;
+        
+        VersionedValue(String value, long version) {
+            this.value = value;
+            this.version = version;
+        }
+    }
+    
+    /**
+     * Represents a transaction that can contain multiple operations
+     */
+    private static class Transaction {
+        // Tracks all keys read during this transaction
+        Map<String, VersionedValue> readSet = new HashMap<>();
+        
+        // Buffers all write operations
+        Map<String, String> writeSet = new HashMap<>();
+        
+        // Tracks keys to be deleted
+        Set<String> deleteSet = new HashSet<>();
+        
+        // Indicates whether this transaction is in multi-exec mode
+        boolean inMultiExecBlock = false;
+    }
+    
+    /**
+     * Retrieves the value associated with the specified key.
+     * 
+     * @param key the key to look up
+     * @return the value associated with the key, or null if the key is not found
+     */
+    public String get(String key) {
+        Transaction transaction = currentTransaction.get();
+        
+        if (transaction != null) {
+            // Check if key is marked for deletion in this transaction
+            if (transaction.deleteSet.contains(key)) {
+                return null;
+            }
+            
+            // Check if key has been written in this transaction
+            if (transaction.writeSet.containsKey(key)) {
+                return transaction.writeSet.get(key);
+            }
+        }
+        
+        // Read from main store
+        VersionedValue vv = data.get(key);
+        if (vv == null) {
+            return null;
+        }
+        
+        // Record this read in the transaction's read set for conflict detection
+        if (transaction != null) {
+            transaction.readSet.putIfAbsent(key, vv);
+        }
+        
+        return vv.value;
+    }
+    
+    /**
+     * Associates a value with a key.
+     * 
+     * @param key the key to associate the value with
+     * @param value the value to be associated with the key
+     */
+    public void set(String key, String value) {
+        Transaction transaction = currentTransaction.get();
+        
+        if (transaction != null) {
+            // Buffer the write operation
+            transaction.writeSet.put(key, value);
+            transaction.deleteSet.remove(key);
+        } else {
+            // Direct write to main store
+            data.put(key, new VersionedValue(value, globalVersion.incrementAndGet()));
+        }
+    }
+    
+    /**
+     * Removes a key and its associated value.
+     * 
+     * @param key the key to be removed
+     */
+    public void delete(String key) {
+        Transaction transaction = currentTransaction.get();
+        
+        if (transaction != null) {
+            // Mark key for deletion
+            transaction.deleteSet.add(key);
+            transaction.writeSet.remove(key);
+        } else {
+            // Direct delete from main store
+            data.remove(key);
+        }
+    }
+    
+    /**
+     * Begins watching the specified keys for changes.
+     * If any of these keys are modified before the transaction is executed,
+     * the transaction will fail.
+     * 
+     * @param keys the keys to watch
+     */
+    public void watch(String... keys) {
+        if (currentTransaction.get() != null && currentTransaction.get().inMultiExecBlock) {
+            throw new IllegalStateException("Cannot call WATCH inside a MULTI block");
+        }
+        
+        Set<String> watchSet = watchedKeys.get();
+        for (String key : keys) {
+            // Record current versions of watched keys
+            VersionedValue vv = data.get(key);
+            if (vv != null) {
+                // Start transaction if not already started
+                if (currentTransaction.get() == null) {
+                    begin();
+                }
+                
+                // Record the version we've seen
+                Transaction tx = currentTransaction.get();
+                tx.readSet.put(key, vv);
+            }
+            watchSet.add(key);
+        }
+    }
+    
+    /**
+     * Marks the start of a transaction block.
+     * Subsequent commands will be queued until EXEC is called.
+     */
+    public void multi() {
+        if (currentTransaction.get() == null) {
+            begin();
+        }
+        
+        Transaction tx = currentTransaction.get();
+        if (tx.inMultiExecBlock) {
+            throw new IllegalStateException("MULTI calls cannot be nested");
+        }
+        
+        tx.inMultiExecBlock = true;
+    }
+    
+    /**
+     * Executes all commands issued after MULTI.
+     * 
+     * @return true if the transaction was executed successfully, false otherwise
+     */
+    public boolean exec() {
+        Transaction tx = currentTransaction.get();
+        if (tx == null || !tx.inMultiExecBlock) {
+            throw new IllegalStateException("EXEC called outside of MULTI block");
+        }
+        
+        tx.inMultiExecBlock = false;
+        return commit();
+    }
+    
+    /**
+     * Flushes all commands issued after MULTI.
+     */
+    public void discard() {
+        Transaction tx = currentTransaction.get();
+        if (tx == null) {
+            throw new IllegalStateException("No transaction in progress");
+        }
+        
+        if (!tx.inMultiExecBlock) {
+            throw new IllegalStateException("DISCARD called outside of MULTI block");
+        }
+        
+        rollback();
+    }
+    
+    /**
+     * Starts a new transaction.
+     * This is called implicitly when needed but can be called explicitly as well.
+     */
+    private void begin() {
+        if (currentTransaction.get() != null) {
+            throw new IllegalStateException("Transaction already in progress");
+        }
+        
+        currentTransaction.set(new Transaction());
+    }
+    
+    /**
+     * Commits the current transaction.
+     * 
+     * @return true if the transaction was committed successfully, false if there was a conflict
+     */
+    public boolean commit() {
+        Transaction transaction = currentTransaction.get();
+        if (transaction == null) {
+            throw new IllegalStateException("No transaction in progress");
+        }
+        
+        try {
+            // Validate read set (optimistic concurrency control)
+            for (Map.Entry<String, VersionedValue> entry : transaction.readSet.entrySet()) {
+                String key = entry.getKey();
+                VersionedValue expectedVV = entry.getValue();
+                VersionedValue currentVV = data.get(key);
+                
+                // Check if the key has been modified since we read it
+                if (currentVV == null || currentVV.version != expectedVV.version) {
+                    // Conflict detected
+                    return false;
+                }
+            }
+            
+            // Apply all buffered writes atomically
+            for (String key : transaction.deleteSet) {
+                data.remove(key);
+            }
+            
+            for (Map.Entry<String, String> entry : transaction.writeSet.entrySet()) {
+                data.put(entry.getKey(), new VersionedValue(
+                        entry.getValue(), globalVersion.incrementAndGet()));
+            }
+            
+            return true;
+        } finally {
+            // Clean up transaction state
+            currentTransaction.remove();
+            watchedKeys.remove();
+        }
+    }
+    
+    /**
+     * Rolls back the current transaction.
+     */
+    public void rollback() {
+        Transaction transaction = currentTransaction.get();
+        if (transaction == null) {
+            throw new IllegalStateException("No transaction in progress");
+        }
+        
+        // Discard all buffered operations
+        currentTransaction.remove();
+        watchedKeys.remove();
+    }
+    
+    /**
+     * Returns the number of key-value pairs in the store.
+     * 
+     * @return the number of key-value pairs
+     */
+    public int size() {
+        return data.size();
+    }
+    
+    /**
+     * Clears all key-value pairs from the store.
+     */
+    public void clear() {
+        data.clear();
+        globalVersion.set(0);
+    }
+}
+```
+
+```java
+package lld.KeyValue;
+
+/**
+ * Command processor for the in-memory key-value store that interprets and executes
+ * string commands similar to Redis.
+ */
+public class KeyValueCommandProcessor {
+    private final InMemoryKeyValueStore store;
+    
+    public KeyValueCommandProcessor() {
+        this.store = new InMemoryKeyValueStore();
+    }
+    
+    /**
+     * Processes a command string and returns the result.
+     * 
+     * @param command the command to process
+     * @return the result of the command
+     */
+    public String processCommand(String command) {
+        if (command == null || command.trim().isEmpty()) {
+            return "ERROR: Empty command";
+        }
+        
+        String[] parts = command.trim().split("\\s+", 2);
+        String cmd = parts[0].toUpperCase();
+        String args = parts.length > 1 ? parts[1] : "";
+        
+        try {
+            switch (cmd) {
+                case "GET":
+                    return handleGet(args);
+                case "SET":
+                    return handleSet(args);
+                case "DEL":
+                case "DELETE":
+                    return handleDelete(args);
+                case "WATCH":
+                    return handleWatch(args);
+                case "MULTI":
+                    return handleMulti();
+                case "EXEC":
+                    return handleExec();
+                case "DISCARD":
+                    return handleDiscard();
+                default:
+                    return "ERROR: Unknown command '" + cmd + "'";
+            }
+        } catch (IllegalStateException e) {
+            return "ERROR: " + e.getMessage();
+        } catch (Exception e) {
+            return "ERROR: " + e.getClass().getSimpleName() + " - " + e.getMessage();
+        }
+    }
+    
+    private String handleGet(String args) {
+        if (args.isEmpty()) {
+            return "ERROR: GET requires a key argument";
+        }
+        
+        String key = args.split("\\s+")[0];
+        String value = store.get(key);
+        return value == null ? "(nil)" : value;
+    }
+    
+    private String handleSet(String args) {
+        String[] parts = args.split("\\s+", 2);
+        if (parts.length < 2) {
+            return "ERROR: SET requires key and value arguments";
+        }
+        
+        store.set(parts[0], parts[1]);
+        return "OK";
+    }
+    
+    private String handleDelete(String args) {
+        if (args.isEmpty()) {
+            return "ERROR: DEL requires a key argument";
+        }
+        
+        String key = args.split("\\s+")[0];
+        store.delete(key);
+        return "OK";
+    }
+    
+    private String handleWatch(String args) {
+        if (args.isEmpty()) {
+            return "ERROR: WATCH requires at least one key argument";
+        }
+        
+        String[] keys = args.split("\\s+");
+        store.watch(keys);
+        return "OK";
+    }
+    
+    private String handleMulti() {
+        store.multi();
+        return "OK";
+    }
+    
+    private String handleExec() {
+        boolean success = store.exec();
+        return success ? "OK" : "ABORTED: Transaction failed due to conflicts";
+    }
+    
+    private String handleDiscard() {
+        store.discard();
+        return "OK";
+    }
+}
+```
+
+```java
+package lld.KeyValue;
+
+import java.util.Scanner;
+
+/**
+ * Demo application for the in-memory key-value store with transactions.
+ */
+public class KeyValueStoreDemo {
+    public static void main(String[] args) {
+        KeyValueCommandProcessor processor = new KeyValueCommandProcessor();
+        Scanner scanner = new Scanner(System.in);
+        
+        System.out.println("In-Memory Key-Value Store with Transaction Support");
+        System.out.println("Enter commands (type EXIT to quit):");
+        System.out.println("Available commands: GET, SET, DELETE, WATCH, MULTI, EXEC, DISCARD");
+        
+        while (true) {
+            System.out.print("> ");
+            String line = scanner.nextLine().trim();
+            
+            if (line.equalsIgnoreCase("EXIT")) {
+                break;
+            }
+            
+            String result = processor.processCommand(line);
+            System.out.println(result);
+        }
+        
+        scanner.close();
+        System.out.println("Goodbye!");
+    }
+}
+```
+
+/**
+ * Example usage:
+ *
+ * 1. Basic operations:
+ *    > SET key1 value1
+ *    OK
+ *    > GET key1
+ *    value1
+ *    > DELETE key1
+ *    OK
+ *    > GET key1
+ *    (nil)
+ *
+ * 2. Transaction with MULTI/EXEC:
+ *    > MULTI
+ *    OK
+ *    > SET key1 value1
+ *    OK
+ *    > SET key2 value2
+ *    OK
+ *    > GET key1
+ *    value1
+ *    > EXEC
+ *    OK
+ *
+ * 3. Transaction with WATCH (no conflicts):
+ *    > SET counter 1
+ *    OK
+ *    > WATCH counter
+ *    OK
+ *    > MULTI
+ *    OK
+ *    > SET counter 2
+ *    OK
+ *    > EXEC
+ *    OK
+ *
+ * 4. Transaction with WATCH (with conflicts):
+ *    Thread 1:                Thread 2:
+ *    > WATCH counter          
+ *    OK                       
+ *    > MULTI                  > SET counter 999
+ *    OK                       OK
+ *    > SET counter 2          
+ *    OK                       
+ *    > EXEC                   
+ *    ABORTED                  
+ *
+ * 5. Transaction with DISCARD:
+ *    > MULTI
+ *    OK
+ *    > SET key1 newvalue
+ *    OK
+ *    > DISCARD
+ *    OK
+ *    > GET key1
+ *    value1  (unchanged)
+ */

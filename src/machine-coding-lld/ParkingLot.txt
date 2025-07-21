@@ -1,0 +1,167 @@
+package lld.parkinglot;
+
+import java.time.Duration;
+import java.time.LocalDateTime;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.PriorityBlockingQueue;
+
+/**
+ * Minimal yet production-grade Parking-Lot implementation covering:
+ *  • Multiple floors with slots of different types (BIKE, CAR, TRUCK)
+ *  • Nearest-slot allocation using PriorityQueue per floor & slot-type
+ *  • Thread-safe operations (ConcurrentHashMap + PBQ)
+ *  • Ticketing & simple hourly pricing strategy
+ */
+public class ParkingLotDemo {
+    public static void main(String[] args) throws InterruptedException {
+        ParkingLot lot = new ParkingLot("Lot-1");
+        // Floor-0: 2 bike, 2 car, 1 truck
+        lot.addFloor(0, Map.of(
+                SlotType.BIKE, 2,
+                SlotType.CAR, 2,
+                SlotType.TRUCK, 1));
+
+        ParkingService svc = new ParkingService(lot);
+        Vehicle v1 = new Vehicle("KA-01-1234", VehicleType.CAR);
+        Vehicle v2 = new Vehicle("KA-02-AB12", VehicleType.BIKE);
+
+        Ticket t1 = svc.park(v1);
+        Ticket t2 = svc.park(v2);
+        System.out.println("Issued tickets:\n" + t1 + "\n" + t2);
+
+        Thread.sleep(1500); // wait 1.5s to accrue some cost
+
+        double fee = svc.unPark(t1.getTicketId());
+        System.out.printf("Un-parked %s, fee = %.2f%n", v1.getRegNo(), fee);
+    }
+}
+
+// ==================== DOMAIN ====================
+class Vehicle {
+    private final String regNo;
+    private final VehicleType type;
+    public Vehicle(String regNo, VehicleType type) { this.regNo = regNo; this.type = type; }
+    public String getRegNo() { return regNo; }
+    public VehicleType getType() { return type; }
+}
+
+enum VehicleType { BIKE, CAR, TRUCK }
+
+enum SlotType {
+    BIKE(EnumSet.of(VehicleType.BIKE), 1.0),
+    CAR(EnumSet.of(VehicleType.CAR), 2.0),
+    TRUCK(EnumSet.of(VehicleType.TRUCK), 3.5);
+
+    private final Set<VehicleType> allowed;
+    private final double hourlyRate;
+    SlotType(Set<VehicleType> allowed, double rate) { this.allowed = allowed; this.hourlyRate = rate; }
+    boolean supports(VehicleType vt) { return allowed.contains(vt); }
+    double rate() { return hourlyRate; }
+}
+
+class ParkingSlot implements Comparable<ParkingSlot> {
+    private final int floorNo;
+    private final int slotNo;
+    private final SlotType slotType;
+    private volatile boolean occupied;
+    ParkingSlot(int floorNo, int slotNo, SlotType type) {
+        this.floorNo = floorNo; this.slotNo = slotNo; this.slotType = type; }
+    boolean isFree() { return !occupied; }
+    void occupy() { occupied = true; }
+    void release() { occupied = false; }
+    SlotType getType() { return slotType; }
+    int getFloorNo() { return floorNo; } // added getter
+    @Override public int compareTo(ParkingSlot o) { // nearest first (lower floor, lower slot)
+        if (floorNo != o.floorNo) return Integer.compare(floorNo, o.floorNo);
+        return Integer.compare(slotNo, o.slotNo);
+    }
+    @Override public String toString() { return "F"+floorNo+"-S"+slotNo+"("+slotType+")"; }
+}
+
+class Ticket {
+    private final String ticketId;
+    private final ParkingSlot slot;
+    private final Vehicle vehicle;
+    private final LocalDateTime inTime;
+    private LocalDateTime outTime;
+    Ticket(String id, ParkingSlot slot, Vehicle v) {
+        this.ticketId = id; this.slot = slot; this.vehicle = v; this.inTime = LocalDateTime.now(); }
+    void close() { this.outTime = LocalDateTime.now(); }
+    Duration duration() { return Duration.between(inTime, outTime != null ? outTime : LocalDateTime.now()); }
+    double calcFee() {
+        long minutes = Math.max(1, duration().toMinutes());
+        double hours = Math.ceil(minutes / 60.0);
+        return slot.getType().rate() * hours;
+    }
+    public String getTicketId() { return ticketId; }
+    public ParkingSlot getSlot() { return slot; }
+    @Override public String toString() { return "Ticket{"+ticketId+","+slot+","+vehicle.getRegNo()+"}"; }
+}
+
+// ==================== REPOSITORY ====================
+class ParkingFloor {
+    private final int floorNo;
+    // free slots PQ per slotType
+    private final Map<SlotType, PriorityBlockingQueue<ParkingSlot>> freeSlots = new EnumMap<>(SlotType.class);
+    ParkingFloor(int floorNo) { this.floorNo = floorNo; }
+    void addSlots(SlotType type, int count) {
+        freeSlots.putIfAbsent(type, new PriorityBlockingQueue<>());
+        PriorityBlockingQueue<ParkingSlot> pq = freeSlots.get(type);
+        int base = pq.size();
+        for (int i=1;i<=count;i++) pq.add(new ParkingSlot(floorNo, base+i, type));
+    }
+    ParkingSlot allocate(VehicleType vt) {
+        for (SlotType st : SlotType.values())
+            if (st.supports(vt)) {
+                PriorityBlockingQueue<ParkingSlot> pq = freeSlots.get(st);
+                if (pq!=null) {
+                    ParkingSlot slot = pq.poll();
+                    if (slot!=null) { slot.occupy(); return slot; }
+                }
+            }
+        return null;
+    }
+    void free(ParkingSlot slot) {
+        slot.release();
+        freeSlots.get(slot.getType()).offer(slot);
+    }
+}
+
+class ParkingLot {
+    private final String id;
+    private final Map<Integer, ParkingFloor> floors = new ConcurrentHashMap<>();
+    private final Map<String, Ticket> activeTickets = new ConcurrentHashMap<>();
+    ParkingLot(String id) { this.id = id; }
+    void addFloor(int floorNo, Map<SlotType,Integer> slotConfig) {
+        ParkingFloor floor = new ParkingFloor(floorNo);
+        slotConfig.forEach(floor::addSlots);
+        floors.put(floorNo, floor);
+    }
+    Ticket park(Vehicle v) {
+        for (ParkingFloor f : floors.values()) {
+            ParkingSlot slot = f.allocate(v.getType());
+            if (slot!=null) {
+                Ticket t = new Ticket(UUID.randomUUID().toString(), slot, v);
+                activeTickets.put(t.getTicketId(), t);
+                return t;
+            }
+        }
+        throw new IllegalStateException("No slot available for " + v.getType());
+    }
+    double unpark(String ticketId) {
+        Ticket t = Optional.ofNullable(activeTickets.remove(ticketId))
+                           .orElseThrow(() -> new IllegalArgumentException("Invalid ticket"));
+        t.close();
+        ParkingFloor floor = floors.get(t.getSlot().getFloorNo()); // corrected
+        floor.free(t.getSlot());
+        return t.calcFee();
+    }
+}
+
+class ParkingService {
+    private final ParkingLot lot;
+    ParkingService(ParkingLot lot) { this.lot = lot; }
+    Ticket park(Vehicle v) { return lot.park(v); }
+    double unPark(String ticketId) { return lot.unpark(ticketId); }
+}

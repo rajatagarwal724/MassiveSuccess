@@ -1,0 +1,203 @@
+# Calendar System Design – Comprehensive Principal-Level Study
+
+> Prepared 17 Jun 2025 by Cascade AI for knowledge-repository of system-design references.
+>
+> Scope: A large-scale consumer+enterprise calendar platform (think Google Calendar / Microsoft Outlook) 
+supporting hundreds of millions of users, multi-device sync, sharing, advanced search, and intelligent scheduling.
+
+---
+## 1. Introduction
+A calendar system stores time-based events, enables collaboration through invitations and shared calendars, 
+sends timely reminders, and synchronises seamlessly across devices and time-zones. 
+Core challenges include recurrence expansion, conflict detection, free/busy computation, 
+offline sync, and multi-tenant scalability while maintaining milli-second query latency.
+
+---
+## 2. Requirements
+### 2.1 Functional
+1. Create / update / delete events (one-off & recurring).
+2. Support invitations (RSVP yes / no / maybe) & attendee status tracking.
+3. Shared calendars & delegated access (read, write, admin).
+4. Free/busy availability queries for intelligent scheduling.
+5. Notifications & reminders (email, push, SMS, webhooks).
+6. Multi-time-zone awareness; daylight-saving adjustments.
+7. Powerful search (title, attendees, location, full-text notes, time range).
+8. Import/export via iCalendar (ICS) & CalDAV APIs.
+9. Offline & multi-device sync with conflict resolution.
+
+### 2.2 Non-Functional
+* **Latency**: <100 ms p95 for read queries; <200 ms p95 writes.
+* **Reliability**: 99.99 % availability; zero data-loss.
+* **Scalability**: 500 M MAU, 2 B events, 50 K QPS peak reads, 10 K QPS peak writes.
+* **Consistency**: Eventual across regions; strong within partition for writes.
+* **Security**: TLS, OAuth2, granular ACLs, audit logs, GDPR/CCPA compliant.
+* **Extensibility**: Plug-in machine-learning modules (smart suggestions).
+
+### 2.3 Extended / Nice-to-Have
+* Resource booking (meeting rooms, equipment).
+* Automatic time-zone suggestions while travelling.
+* AI conflict-resolution proposals / “Find a time”.
+* Super-large recurring series optimisation (>10 years).
+
+---
+## 3. Capacity Estimation (High-Level)
+* Users: 500 M. Assume 60 % active/day ≈ 300 M DAU.
+* Average calendars/user: 5 (personal, shared, holidays) ⇒ 2.5 B calendars.
+* Events/user: 1 000 (past+future) ⇒ 500 B events (incl. recurrence instances).
+* Write QPS: 10 K (create/update/cancel, RSVPs).
+* Read QPS: 50 K (sync, list, search, free/busy).
+* Notifications: 200 K/ sec peak (reminders, updates).
+* Storage: Event raw ≈ 0.5 KB avg ⇒ 250 TB; Indexes & replicas ×3 ⇒ 750 TB.
+
+---
+## 4. High-Level Architecture Overview
+```
+                 ┌────────────────────┐
+  Mobile/Web     │   API Gateway      │  OAuth2, Throttle
+                 └────────┬───────────┘
+                          │gRPC/REST
+        ┌─────────────────┴──────────────────┐
+        │            Backend Mesh           │
+        │  • Calendar Service               │
+        │  • Event Service                  │
+        │  • Invite / RSVP Service          │
+        │  • FreeBusy / Availability        │
+        │  • Notification Service           │
+        │  • Sync Gateway (Delta/Streaming) │
+        │  • Search Service (ES/Solr)       │
+        └──────┬───────────────┬────────────┘
+               │CQRS+Events    │Async Kafka
+               ▼               ▼
+    ┌────────────────────┐   ┌─────────────────────┐
+    │  Primary Data Store│   │   Message Bus       │ (Kafka/Pulsar)
+    │  (Shard-per-User)  │   │  Notifications/ES   │
+    │  Aurora/MySQL      │   └─────────────────────┘
+    └──────────┬─────────┘
+               │CDC
+               ▼
+      ┌────────────────────┐
+      │  Indexing Worker   │→ ElasticSearch, Cache
+      └────────────────────┘
+```
+* **Write Path**: API → Event Service (validation, conflict check) → MySQL shard (or Spanner/Cockroach) → Kafka CDC → downstream caches/search.
+* **Read Path**: For timeline view, use **Read-Optimised Event Store (ROES)** or materialised views in Redis/Memcached.
+* **Notifications**: Event bus to Notification Service; pushes via APNs/FCM/email/SMS.
+
+---
+## 5. Data Model
+### 5.1 Entities
+| Entity | Key | Important Fields |
+|--------|-----|------------------|
+| **User** | `user_id` | name, locale, TZ, prefs |
+| **Calendar** | `cal_id` (UUID) | owner, ACL list, color, type |
+| **Event** | `(event_id, cal_id)` | title, start, end, tz, location, recurrence_rule, creator, version, etag |
+| **RecurrenceRule** | RRULE (RFC5545) | freq, interval, byDay, count/until |
+| **Occurrence** | virtual row generated from recurrence expansion cache |
+| **Invitee** | `(event_id, user_id)` | status (Yes/No/Maybe), last_updated |
+| **Notification** | id | type (reminder, update), send_time |
+
+### 5.2 Storage Strategy
+1. **Authoritative Store**: Partitioned SQL (Aurora/Spanner) – strong consistency on writes.
+2. **Occurrence Cache**: Pre-expanded occurrences in wide-column NoSQL (Cassandra) for fast range scans
+ (timeline view, free/busy).
+3. **Search Index**: ElasticSearch cluster per region; ingested via Kafka.
+4. **Redis/Memcached**: Hot cache for GET event by id / small timeline windows.
+
+---
+## 6. Detailed Component Design
+### 6.1 Event Service
+* Validation (time-zone sanity, recurrence limits).
+* **Optimistic concurrency** using `version/etag` to prevent lost update.
+* Emits `EventCreated/Updated/Deleted` to Kafka.
+* Handles **conflict detection** if overlapping events flagged by Availability Service.
+
+### 6.2 Recurrence Expansion & Occurrence Cache
+* Cron job or stream processor consumes Event topics; expands recurrence up to **N months ahead** (configurable, e.g. 1 year) to Occurrence table.
+* On event update, delta expansion adjusts occurrences; uses idempotent UPSERT.
+
+### 6.3 Free/Busy & Smart Scheduling
+* FreeBusy Service queries Occurrence table using covering index `(user_id, start_ts)`.
+* Intersects attendee calendars; proposes slots.
+* To scale: pre-aggregate busy buckets (e.g. 15-min) per user/day in Redis.
+
+### 6.4 Invitation Workflow
+1. Creator adds attendees → Invite Service writes rows (status=PENDING).
+2. Sends invitation e-mail with `method:REQUEST` ICS.
+3. When attendee RSVPs → Invite Service updates status & triggers Notification.
+* All steps idempotent; duplicate ICS ignored via UID.
+
+### 6.5 Notification Service
+* Subscribes to **Reminders Stream** (derived from Occurrence table: `start_time – reminder_offset`).
+* Batch window to coalesce; fan-out via Push Gateway (APNs/FCM), email micro-service, SMS provider.
+
+### 6.6 Sync Gateway
+* **Delta sync**: clients send `last_sync_token`; server returns changed events + new sync token (Lamport clock or log offset).
+* Webhooks (subscription) for server-to-server CalDAV change notifications.
+* WebSocket streaming for near-real-time updates.
+
+### 6.7 Search Service
+* Full-text index (title, description, attendee email, location).
+* Date range filter; fuzzy search.
+* Multi-tenant separation using routing key.
+
+### 6.8 Access Control & Sharing
+* ACL table: `(cal_id, principal_id, role)` roles = OWNER/WRITE/READ.
+* Propagate ACL to Search & Cache for enforcement.
+
+---
+## 7. Scalability Strategies
+1. **User-based Sharding**: consistent-hash `user_id` → SQL cluster; guarantees single-user atomic transactions.
+2. **Read Replica Fan-out** for heavy read endpoints (timeline/search) behind ProxySQL.
+3. **Multi-Region Active/Active**: Cross-region replication (Spanner) or Write-in-Primary + async log shipping.
+4. Caches with **near-cache invalidation** triggered by CDC events (Redis key-space notifications or PubSub).
+
+---
+## 8. Reliability & Fault Tolerance
+* **Replication**: 3-AZ quorum for SQL; RF=3 for Cassandra; 3-rep shards for Kafka/ES.
+* **Backups**: Daily snapshots; point-in-time recovery via WAL.
+* **Graceful Degradation**: If Occurrence cache down, fall back to on-the-fly expansion with higher latency.
+* **Idempotent APIs** with client-supplied `request_id`.
+
+---
+## 9. Consistency & Conflict Resolution
+* **Strong write, eventual read** – timeline may lag milliseconds; sync tokens guarantee monotonic session-consistency.
+* Attendee conflict: last-write-wins + merge algorithm; surfaced to UI as “conflict”.
+* Recurrence exceptions stored separately (`exdate`, `rdate`) to avoid duplication.
+
+---
+## 10. Security Considerations
+* OAuth2 + OpenID Connect; Refresh tokens encrypted at rest (KMS).
+* Row-level ACL enforcement.
+* End-to-end TLS (HTTP/2 for efficiency).
+* S/MIME or DKIM for invitation emails; anti-spoofing.
+* GDPR: Right-to-be-forgotten job wiping user data across stores & indexes.
+
+---
+## 11. Monitoring & Observability
+* **SLIs**: write latency, read latency, sync lag, reminder delivery success, notification backlog, search p95.
+* Distributed tracing (OpenTelemetry) across microservices.
+* Alerting on error budgets; auto-scaling policies tied to CPU & custom QPS metric.
+
+---
+## 12. Trade-offs & Key Challenges
+| Area | Options | Decision | Rationale |
+|------|---------|----------|-----------|
+| Authoritative DB | Spanner vs Aurora MySQL Sharded | Aurora (start) → Spanner (future) | Lower cost, gradual path. |
+| Recurrence Expansion | On-the-fly vs Pre-materialised | Hybrid: cache 1 yr ahead | Balance storage vs CPU. |
+| Sync Model | Poll vs Push | Delta + Push | Low bandwidth yet near-RT. |
+| Conflict Resolution | Pessimistic Lock vs Optimistic | Optimistic | UI handles conflicts; better perf. |
+| Free/Busy | Live compute vs Pre-bucket | Pre-bucket busy bits | O(1) query for scheduler. |
+
+---
+## 13. Future Enhancements
+1. **Machine-learning suggestions** (auto-pick meeting slot, travel time alerts).
+2. **GraphQL API layer** for flexible client queries.
+3. **Edge caching** of ICS feeds via CDN.
+4. **Decaying event storage** – archive events older than N years to cold storage.
+5. **CRDT-based real-time co-editing** of shared events.
+
+---
+## 14. Conclusion
+Designing a planet-scale calendar demands careful handling of time-zone math, recurrence, high read traffic, and cross-device consistency. By separating write-optimised authoritative storage from read-optimised occurrence caches, embracing event streams for sync/indexing, and enforcing strong but simple domain boundaries, the proposed architecture achieves reliability, scalability, and extensibility for both consumer and enterprise use-cases.
+
+*End of document.*

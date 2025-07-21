@@ -1,0 +1,299 @@
+# Catalog Event Enrichment & Analytics Pipeline (Google Scale)
+
+> Design for a system that ingests high-volume catalog events, enriches them with additional data, 
+and makes them available for real-time analytics and batch processing.
+
+---
+## 1. Requirements & Scope
+
+### 1.1 Functional Requirements
+1.  **Event Ingestion**: Accept catalog events (e.g., product created, price updated, stock changed,
+ item viewed, item purchased) from various sources.
+2.  **Data Enrichment**: Augment raw events with additional information. Examples:
+    *   Product event + product metadata (category, brand, supplier info from a Product Master DB).
+    *   User activity event + user profile data (demographics, location from User DB).
+    *   Location-based event + geo-mapping data (city, country from Geo DB).
+3.  **Schema Evolution**: Handle changes in raw event schemas and enrichment source schemas gracefully.
+4.  **Data Storage**: Store both raw (for reprocessing) and enriched events.
+5.  **Analytics Access**: Provide access to enriched data for:
+    *   Real-time/near real-time dashboards (e.g., current sales trends, popular items).
+    *   Batch analytics & reporting (e.g., weekly sales reports, user segmentation).
+    *   Ad-hoc querying by data scientists.
+6.  **Data Quality**: Mechanisms for monitoring and ensuring data accuracy and completeness.
+
+### 1.2 Non-Functional Requirements
+1.  **Scalability**: Handle Google-scale event volume (e.g., millions of events per second, petabytes of data).
+2.  **Latency**:
+    *   Ingestion to enriched availability (for real-time analytics): seconds to minutes.
+    *   Enrichment processing latency: milliseconds per event.
+3.  **Reliability & Durability**: No data loss for raw events. At-least-once processing for enrichment.
+4.  **Availability**: High availability for ingestion and critical analytics pathways.
+5.  **Fault Tolerance**: System should be resilient to component failures.
+6.  **Cost-Effectiveness**: Optimize for storage and compute costs.
+7.  **Maintainability & Operability**: Easy to monitor, debug, and deploy updates.
+
+### 1.3 Out of Scope
+*   The specific machine learning models for analytics (we provide data *for* them).
+*   The front-end applications that generate the initial catalog events.
+*   Detailed UI for dashboards.
+
+---
+## 2. High-Level Architecture
+
+```ascii
++---------------------+      +---------------------------+      +-----------------------------+      +-------------------------+      +---------------------------+
+|    Event Sources    |      |  Ingestion & Buffering    |      |  Enrichment & Processing    |      |   Storage & Serving     |      |  Analytics & Consumption  |
+|---------------------|      |---------------------------|      |-----------------------------|      |-------------------------|      |---------------------------|
+| - Web/App Servers   |----->| API Gateway / Load Balancer |      | Stream Processor (Flink/Spark)|      | Data Warehouse (BigQuery) |----->| Batch Analytics / ML    |
+| - Backend Services  |----->|        (GW)               |<---->|       (EP)                  |<---->|        (DWH)            |<---->| Ad-hoc SQL Queries      |
+| - Inventory Systems |----->|                           |      |                             |      |                         |      |                           |
++---------------------+      |           |               |      |            ^                |      |                         |      |                           |
+                             |           v               |      |            | Lookup         |      |                         |      |                           |
+                             |  Kafka / Pub/Sub (Raw)  |----->|            v                |      | Real-time Datastore     |----->| Real-time Dashboards    |
+                             |        (K)                |      | - Product Master DB         |      | (Druid, Pinot) (RTS)    |<---->| Real-time Alerting      |
+                             +---------------------------+      | - User Profile DB           |      |                         |      |                           |
+                                                                | - Geo DB                    |      |           ^               |      +---------------------------+
+                                                                | - External APIs / Cache     |      |           |               |
+                                                                |            |                |      |           |               |
+                                                                |            v                |      | Raw Data Lake (S3/GCS)  |
+                                                                |  Kafka / Pub/Sub (Enriched) |----->|        (RDL)            |<------(from K - Raw Events)
+                                                                |        (EK)               |      |                         |
+                                                                +-----------------------------+      +-------------------------+
+
+                                                                +-----------------------------+
+                                                                | Monitoring & Management     |
+                                                                |-----------------------------|
+                                                                | - Monitoring & Alerting (M) |<----(from K, EK, EP, DWH, RTS)
+                                                                | - Schema Registry (SM)      |<----(from K, EP)
+                                                                | - Dead Letter Queue Mgr(DLQM)|<----(from EP)
+                                                                +-----------------------------+
+```
+
+**Data Flow:**
+1.  **Ingestion**: Catalog events are sent from various sources to an API Gateway, 
+    which forwards them to a Kafka topic (`raw_events_topic`).
+2.  **Buffering**: Kafka acts as a highly scalable, durable buffer for raw events.
+3.  **Enrichment**: A stream processing job (e.g., Flink) consumes events from `raw_events_topic`.
+    *   For each event, it performs lookups against various data sources (Product DB, User DB, Geo DB, caches, external APIs) to fetch enrichment data.
+    *   It merges raw event data with enrichment data.
+    *   Enriched events are published to another Kafka topic (`enriched_events_topic`).
+4.  **Storage**: 
+    *   Enriched events from `enriched_events_topic` are sunk into:
+        *   A **Data Warehouse** (BigQuery) for batch analytics, complex queries, and historical analysis.
+        *   A **Real-time Datastore** (Druid/Pinot) optimized for low-latency analytical queries for dashboards.
+    *   Raw events from `raw_events_topic` are archived to a **Raw Data Lake** (GCS/S3) for long-term storage, reprocessing, and compliance.
+5.  **Consumption**: 
+    *   Business intelligence tools, data scientists, and ML models query the Data Warehouse and Real-time Datastore.
+    *   Real-time dashboards and alerting systems consume data from the Real-time Datastore.
+
+---
+## 3. Detailed Component Design
+
+### 3.1 Event Ingestion (API Gateway & Kafka)
+*   **API Gateway**: Standard HTTP/gRPC endpoints. Handles auth, rate limiting, basic validation.
+*   **Kafka (or Google Pub/Sub)**: 
+    *   **Why Kafka?**
+        *   **High Throughput**: Can handle millions of messages/sec.
+        *   **Scalability**: Scales horizontally by adding brokers and partitions.
+        *   **Durability**: Replicates data across multiple brokers, preventing data loss.
+        *   **Decoupling**: Acts as a buffer, decoupling producers from consumers. Producers don't need to know about consumers, and vice-versa. This allows services to evolve independently.
+        *   **Stream Processing Integration**: Native integration with stream processing frameworks like Flink, Spark Streaming.
+        *   **Backpressure Handling**: Consumers can pull data at their own pace.
+    *   **Topics**: 
+        *   `raw_events_topic`: For incoming, unprocessed events. High retention for replayability (e.g., 7 days).
+        *   `enriched_events_topic`: For events after enrichment. Shorter retention if data is quickly moved to DWH/RTS (e.g., 1-2 days).
+        *   `dead_letter_topic_enrichment`: For events that failed enrichment.
+    *   **Partitioning**: Partition raw events by `product_id` or `user_id` if sequential processing or data locality for these keys is beneficial for enrichment. Otherwise, random partitioning (e.g., by event_id) for even load distribution.
+
+### 3.2 Enrichment Service (Stream Processor - Flink/Spark Streaming/Dataflow)
+*   **Why a Stream Processor?**
+    *   **Stateful Processing**: Needed for complex enrichments, windowing, or joining streams.
+    *   **Low Latency**: Designed for continuous data processing with minimal delay.
+    *   **Scalability & Fault Tolerance**: Can scale out and recover from failures.
+    *   **Rich Connectors**: Connectors for Kafka, databases, file systems.
+*   **Enrichment Logic**:
+    1.  **Deserialize** raw event (uses Schema Registry).
+    2.  **Identify** keys for lookup (e.g., `product_id`, `user_id`).
+    3.  **Fetch Enrichment Data**:
+        *   **Strategy**: Prioritize low-latency lookups.
+        *   **Caching**: Implement a multi-level cache (in-memory in Flink operator, then distributed cache like Redis/Memcached) for frequently accessed enrichment data (e.g., popular product details, active user segments).
+            *   Cache invalidation: TTL-based, or event-driven if enrichment sources publish update events.
+        *   **Direct DB Lookup**: For cache misses or less frequently accessed data. Use optimized queries.
+        *   **Asynchronous I/O**: Flink's async I/O operators are crucial here to perform non-blocking lookups to external DBs/APIs, preventing the stream from stalling.
+        *   **Batching Lookups**: If possible, batch lookups to external systems for efficiency.
+    4.  **Merge** raw event with enrichment fields.
+    5.  **Serialize** enriched event and publish to `enriched_events_topic`.
+*   **Enrichment Data Sources**: 
+    *   **Product Master DB (e.g., Spanner, CockroachDB, sharded SQL/NoSQL)**: Stores detailed product information. Needs to support high read QPS. Replication for availability.
+    *   **User Profile DB (e.g., Bigtable, Cassandra)**: Stores user attributes. Optimized for key-based lookups.
+    *   **Geo DB (e.g., PostGIS, or specialized geo-service)**: For location-based enrichment.
+*   **Failure Handling**: 
+    *   **Transient Lookup Failures**: Retry with exponential backoff.
+    *   **Persistent Lookup Failures / Bad Data**: Send event to a Dead Letter Queue (DLQ) - `dead_letter_topic_enrichment` - along with error context. A separate batch process or manual intervention can analyze DLQ events.
+    *   **Poison Pills**: If a malformed message crashes an operator, ensure it's skipped or sent to DLQ after N retries to avoid blocking the pipeline.
+*   **Schema Management**: Use a **Schema Registry** (e.g., Confluent Schema Registry, Apicurio).
+    *   Producers register schemas for raw events.
+    *   Enrichment service fetches schemas to deserialize raw events and registers schemas for enriched events.
+    *   Enforces schema compatibility (backward, forward) to allow independent evolution of producers and consumers.
+
+### 3.3 Data Storage
+
+#### 3.3.1 Raw Data Lake (GCS, S3)
+*   **Purpose**: Cheap, durable long-term storage for all raw events. Source of truth for reprocessing, auditing, and historical batch jobs that might need the original unaltered data.
+*   **Format**: Parquet or Avro (columnar, splittable, schema-aware).
+*   **Ingestion**: Kafka Connect (S3/GCS Sink connector) or a simple batch job reading from Kafka.
+
+#### 3.3.2 Data Warehouse (BigQuery, Snowflake, Redshift)
+*   **Purpose**: Primary store for batch analytics, complex SQL queries, BI reporting, and ML model training on historical enriched data.
+*   **Why BigQuery (example)?**
+    *   **Serverless & Scalable**: Automatically scales compute and storage.
+    *   **SQL Interface**: Familiar for analysts.
+    *   **Performance**: Optimized for large-scale analytical queries.
+    *   **Integration**: Good integration with other GCP services and BI tools.
+*   **Schema**: Denormalized or star/snowflake schema optimized for analytical queries. Enriched events form fact tables; dimension tables can be derived from enrichment sources or master data.
+*   **Updates**: Typically append-only for events. Dimensions updated periodically.
+
+#### 3.3.3 Real-time Datastore (Apache Druid, Apache Pinot, ClickHouse)
+*   **Purpose**: Serve low-latency (sub-second to few seconds) analytical queries for real-time dashboards and operational intelligence.
+*   **Why Druid/Pinot (example)?**
+    *   **Columnar Storage**: Efficient for analytical queries (scans only required columns).
+    *   **Pre-aggregation/Rollup**: Can aggregate data at ingestion time to speed up queries.
+    *   **Time-series Optimized**: Excellent for time-based slicing and dicing.
+    *   **Scalability**: Designed for distributed, scalable deployments.
+    *   **Streaming Ingestion**: Can ingest directly from Kafka.
+*   **Data**: Typically a subset of enriched data, or aggregated views, focusing on recent data or key metrics.
+
+### 3.4 Analytics & Consumption
+*   **Batch Analytics**: Spark, Hadoop MapReduce, or DWH-native processing (e.g., BigQuery ML) on data in DWH/Data Lake.
+*   **Real-time Dashboards**: Tools like Superset, Tableau, Looker, Grafana querying the Real-time Datastore (Druid/Pinot) or sometimes the DWH for less latency-sensitive views.
+*   **Ad-hoc Querying**: Data scientists and analysts use SQL clients or notebooks (Jupyter) to query DWH.
+
+---
+## 4. Data Model Examples
+
+**Raw Product View Event (JSON):**
+```json
+{
+  "eventId": "uuid-123",
+  "timestamp": "2025-06-17T23:30:00Z",
+  "eventType": "PRODUCT_VIEW",
+  "userId": "user-abc",
+  "productId": "prod-xyz",
+  "sessionId": "session-789",
+  "platform": "mobile_app_android"
+}
+```
+
+**Enriched Product View Event (JSON):**
+```json
+{
+  "eventId": "uuid-123",
+  "timestamp": "2025-06-17T23:30:00Z",
+  "eventType": "PRODUCT_VIEW",
+  "userId": "user-abc",
+  "productId": "prod-xyz",
+  "sessionId": "session-789",
+  "platform": "mobile_app_android",
+  "enrichments": {
+    "product_details": {
+      "name": "Awesome T-Shirt",
+      "category": "Apparel",
+      "brand": "CoolBrand",
+      "price": 19.99,
+      "currency": "USD",
+      "tags": ["cotton", "summer", "new_arrival"]
+    },
+    "user_profile": {
+      "country": "USA",
+      "city_approx": "New York",
+      "user_segment": "fashion_lover",
+      "is_registered": true
+    },
+    "processing_timestamp": "2025-06-17T23:30:05Z"
+  }
+}
+```
+
+---
+## 5. Scalability & Reliability Considerations
+
+*   **Horizontal Scaling**: All components (Kafka, Flink, DBs, storage) are designed to scale horizontally.
+    *   Kafka: Add brokers, partitions.
+    *   Flink: Increase parallelism of operators.
+    *   Databases: Sharding, read replicas, or using inherently distributed DBs (BigQuery, Druid, Spanner, Bigtable).
+*   **Stateless Enrichment Service**: Flink operators for enrichment should ideally be stateless regarding 
+    the event itself (state is managed by Flink for fault tolerance, or externalized to caches/DBs for lookups). 
+    This makes scaling and recovery easier.
+*   **Data Partitioning**: Partition data in Kafka, stream processing, and storage systems to distribute load and enable parallel processing.
+*   **Replication**: Use replication in Kafka, DBs, and storage for fault tolerance and high availability.
+*   **Backpressure Management**: Kafka and stream processors naturally handle backpressure. Ensure downstream sinks (DWH, RTS) can also handle ingestion bursts or apply throttling.
+*   **Idempotent Writes**: Consumers writing to DWH/RTS should handle potential duplicate messages from Kafka (due to at-least-once semantics)
+ by using idempotent writes or deduplication mechanisms if exact-once is critical for analytics.
+*   **Reprocessing**: 
+    *   If enrichment logic changes or bad data was processed, replay events from the Raw Data Lake (GCS/S3) or the `raw_events_topic` in Kafka (if retention allows) through a new version of the enrichment pipeline.
+    *   Output to new tables/topics to avoid corrupting existing correct data, then swap or merge.
+
+---
+## 6. Monitoring & Alerting
+
+*   **Key Metrics**: 
+    *   Ingestion rate (events/sec).
+    *   Kafka topic lag (for all topics).
+    *   Enrichment service processing latency (per event, p95, p99).
+    *   Enrichment error rate, DLQ size.
+    *   Cache hit/miss rates for enrichment lookups.
+    *   Latency of lookups to external data sources.
+    *   End-to-end data pipeline latency.
+    *   Resource utilization (CPU, memory, network) of all components.
+    *   Query latency and throughput for DWH and RTS.
+*   **Tools**: Prometheus, Grafana, ELK stack (Elasticsearch, Logstash, Kibana) for logs, specialized APM tools.
+*   **Alerting**: On critical thresholds (e.g., high Kafka lag, high error rates, pipeline stalled, critical DB down).
+
+---
+## 7. Cross-Cutting Concerns
+
+*   **Data Quality Checks**: 
+    *   Implement validation rules in the enrichment service (e.g., expected fields, data types, ranges).
+    *   Run periodic data quality jobs on DWH data (e.g., using Deequ, Great Expectations) to detect anomalies, missing data, inconsistencies.
+*   **Schema Evolution**: 
+    *   Use Schema Registry with compatibility rules (e.g., backward compatible changes for consumers).
+    *   Enrichment service must be able to handle different versions of raw event schemas.
+    *   Versioning of enriched data schemas.
+*   **Security**: 
+    *   Secure Kafka (TLS, SASL).
+    *   IAM roles and fine-grained access control for all cloud resources and databases.
+    *   Data encryption at rest and in transit.
+    *   PII handling: Tokenization or masking of sensitive PII fields if necessary, especially before landing in broader analytics systems.
+*   **Cost Management**: 
+    *   Choose appropriate storage tiers (e.g., GCS Nearline/Coldline for older raw data).
+    *   Optimize stream processing jobs (e.g., efficient state management, appropriate parallelism).
+    *   Monitor DWH query costs; optimize expensive queries.
+    *   Use spot instances for batch processing where feasible.
+
+---
+## 8. Database Choices - Justifications & Trade-offs
+
+*   **Enrichment Sources (Product Master, User Profile, Geo)**:
+    *   **SQL (Postgres, MySQL, Spanner)**: Good for structured master data, strong consistency, transactional needs. Spanner offers horizontal scalability with strong consistency. Can be expensive. Sharded SQL is an option for scale but adds operational complexity.
+    *   **NoSQL (Cassandra, Bigtable, DynamoDB)**: Excellent for high-volume key-value lookups (e.g., user profile by `user_id`). Scales horizontally. Eventual consistency might be a concern for some enrichment data if strong real-time consistency with the source of truth is paramount.
+    *   **In-Memory DB/Cache (Redis, Memcached)**: For very low-latency access to frequently used enrichment data. Not a primary store.
+    *   **Choice depends on**: Read/write patterns, consistency needs, existing infrastructure, team expertise. Often a mix is used.
+
+*   **Data Warehouse (BigQuery, Snowflake, Redshift)**:
+    *   Designed for OLAP workloads, complex queries over large datasets.
+    *   Columnar storage is key for performance.
+    *   Managed services reduce operational overhead.
+    *   Trade-offs: Cost (can be high for large data/compute), vendor lock-in, specific SQL dialects.
+
+*   **Real-time Datastore (Druid, Pinot, ClickHouse)**:
+    *   Optimized for low-latency queries on time-series or event data, often involving aggregations.
+    *   Typically used for user-facing analytics or dashboards where query speed is critical.
+    *   Trade-offs: Steeper learning curve, more operational effort if self-managed (vs. fully managed DWH), schema might be less flexible than a DWH for exploratory analysis.
+
+*   **Raw Data Lake (GCS, S3)**:
+    *   Object storage is the most cost-effective for large volumes of raw data.
+    *   Highly durable and scalable.
+    *   Schema-on-read flexibility.
+
+---
+This design provides a robust, scalable, and fault-tolerant pipeline for enriching catalog events and making them available for diverse analytical needs at Google scale. The specific technology choices within each component (e.g., Flink vs. Spark, BigQuery vs. Redshift) can be adapted based on existing ecosystems and specific performance/cost requirements.

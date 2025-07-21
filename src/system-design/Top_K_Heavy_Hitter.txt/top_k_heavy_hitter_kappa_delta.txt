@@ -1,0 +1,574 @@
+# System Design: Eventually Consistent Top K Heavy Hitters using Kappa/Delta Architecture
+
+**Version:** 1.0
+**Last Updated:** 2025-06-01
+
+## 1. Introduction
+
+The "Top K Heavy Hitters" problem involves identifying the K most frequent items in a massive data stream or dataset. 
+This document focuses on an eventually consistent implementation using Kappa or Delta Architecture to handle this 
+problem at scale.
+
+### 1.1. Problem Definition
+
+Given a continuous stream of data items, identify the K items occurring most frequently within a defined time window 
+or across the entire stream, with eventual consistency guarantees rather than strict real-time accuracy.
+
+### 1.2. Significance
+
+- **Network Monitoring:** Identify IP addresses with most traffic or frequently accessed URLs
+- **E-commerce:** Track top-selling products and popular searches
+- **Social Media:** Detect trending topics and hashtags
+- **Security:** Spot potential DDoS sources or brute force attempts
+- **Analytics:** Discover user behavior patterns and popular features
+
+### 1.3. Challenges
+
+- **Massive Scale:** Handling billions of events per day across distributed sources
+- **High Cardinality:** Potentially unlimited unique items
+- **Consistency:** Providing eventually consistent results across a distributed system
+- **Latency:** Balancing accuracy with low-latency requirements
+- **Fault Tolerance:** Ensuring reliable operation despite node failures
+
+## 2. Kappa vs. Delta Architecture Overview
+
+### 2.1. Kappa Architecture
+
+Kappa Architecture treats all data as an immutable event stream, with a single processing path for 
+both real-time and historical analysis.
+
+**Key Components:**
+- **Log/Event Store:** Immutable append-only log (e.g., Kafka, Kinesis)
+- **Stream Processing:** Continuous computation over the event stream
+- **Serving Layer:** Query interface for accessing processed results
+
+**Advantages for Heavy Hitters:**
+- Simplified operations (single processing pipeline)
+- Consistent processing semantics
+- Easy reprocessing by replaying events
+- Natural fit for streaming data
+
+### 2.2. Delta Architecture
+
+Delta Architecture extends Lambda Architecture by focusing on change data capture and incremental updates.
+
+**Key Components:**
+- **Change Data Store:** Records only data changes
+- **Delta Computation Layer:** Processes incremental updates
+- **Serving Layer:** Combines base state with recent changes
+
+**Advantages for Heavy Hitters:**
+- Efficient for incremental updates
+- Reduced computational overhead
+- Good balance between batch and streaming
+- Lower storage requirements
+
+## 3. Requirements
+
+### 3.1. Functional Requirements
+
+1. **Identify Top K Items:** Determine the K most frequent items from the data stream
+2. **Configurable Parameters:** Support configurable K values and time windows
+3. **Multi-dimensional Analysis:** Optional ability to segment heavy hitters by dimensions
+4. **Frequency Estimation:** Provide count estimates with defined error bounds
+5. **Query Interface:** API to retrieve current Top K heavy hitters with frequency estimates
+6. **Consistency Guarantees:** Clear definition of eventual consistency SLAs
+
+### 3.2. Non-Functional Requirements
+
+1. **Scalability:** Handle millions of events per second
+2. **Availability:** 99.99% uptime for the processing pipeline
+3. **Eventual Consistency:** Results accurate within defined time bounds (e.g., 5-minute lag)
+4. **Fault Tolerance:** No data loss during component failures
+5. **Performance:** Query response time < 1 second for most recent results
+6. **Resource Efficiency:** Optimized memory and computation usage
+7. **Monitoring:** Comprehensive metrics for system health and accuracy
+
+## 4. High-Level System Architecture
+
+### 4.1. Kappa Architecture Implementation
+
+```
++----------------+     +----------------+     +-------------------+
+| Data Sources   | --> | Event Stream   | --> | Stream Processing |
+| (Applications, |     | (Kafka/Kinesis)|     | (Flink/KStreams)  |
+|  Logs, Sensors)|     +----------------+     +--------+----------+
++----------------+                                      |
+                                                       v
+                     +----------------+      +---------+---------+
+                     | Query Service  | <--- | State Store       |
+                     | (REST/GraphQL) |      | (Redis/RocksDB/   |
+                     +----------------+      |  Cassandra)       |
+                             ^               +-------------------+
+                             |
+                     +-------+--------+
+                     | Applications   |
+                     | (Dashboards,   |
+                     |  Alerts)       |
+                     +----------------+
+```
+
+**Data Flow:**
+1. Events enter the system through the event stream
+2. Stream processors continuously update sketches or counters
+3. Processed state is stored in the state store with eventual consistency
+4. Query service provides access to the current view of heavy hitters
+
+### 4.2. Delta Architecture Implementation
+
+```
++----------------+     +----------------+     +-------------------+
+| Data Sources   | --> | CDC Capture    | --> | Delta Processing  |
+| (Applications, |     | (Debezium,     |     | (Flink/Spark)     |
+|  Logs, Sensors)|     |  Kafka Connect)|     +--------+----------+
++----------------+     +----------------+            |
+                                                    v
++----------------+     +----------------+     +-----+-------------+
+| Base State     | --> | State Merger   | <-- | Delta State       |
+| (Parquet/ORC)  |     | (Batch Job)    |     | (Recent Changes)  |
++----------------+     +-------+--------+     +-------------------+
+                               |
+                               v
+                     +--------+---------+
+                     | Query Service    |
+                     | (REST/GraphQL)   |
+                     +------------------+
+```
+
+**Data Flow:**
+1. Changes are captured and sent to delta processing
+2. Delta processor incrementally updates frequency counts
+3. Periodically, changes are merged with the base state
+4. Query service provides access to combined base+delta state
+
+## 5. Detailed Component Design
+
+### 5.1. Data Ingestion Layer
+
+**Technologies:** Apache Kafka, Amazon Kinesis, Apache Pulsar
+
+**Design Considerations:**
+- **Partitioning Strategy:** Hash-based partitioning by item ID for even distribution
+- **Retention Policy:** 7-day retention to allow for reprocessing
+- **Throughput:** Configured to handle peak traffic with 2x buffer
+- **Compression:** Snappy or LZ4 compression for efficiency
+
+**Configuration (Example for Kafka):**
+```
+topic.partitions=128
+topic.replication.factor=3
+topic.retention.ms=604800000  # 7 days
+compression.type=snappy
+```
+
+### 5.2. Stream Processing Layer
+
+#### 5.2.1. For Kappa Architecture
+
+**Technologies:** Apache Flink, Kafka Streams, Apache Samza
+
+**Processing Components:**
+- **Window Manager:** Defines tumbling or sliding windows (configurable)
+- **Sketch Processor:** Updates probabilistic data structures for frequency tracking
+- **State Manager:** Handles state persistence and recovery
+- **Result Publisher:** Publishes updated heavy hitter sets to serving layer
+
+**Algorithm Selection:**
+- **Count-Min Sketch:** Space-efficient probabilistic data structure
+- **Space-Saving Algorithm:** Maintains counters for potential heavy hitters
+- **Hybrid Approach:** CMS for candidate detection, Space-Saving for precise tracking
+
+**Flink Job Configuration (Example):**
+```java
+StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+env.enableCheckpointing(60000); // 1-minute checkpoints
+env.setStateBackend(new RocksDBStateBackend("s3://bucket/checkpoints"));
+env.setParallelism(64);
+```
+
+#### 5.2.2. For Delta Architecture
+
+**Technologies:** Apache Spark Structured Streaming, Apache Flink
+
+**Processing Components:**
+- **Change Detector:** Identifies changes from base state
+- **Incremental Updater:** Updates frequency counts based on changes
+- **Merger:** Periodically merges delta with base state
+
+**Optimization Techniques:**
+- **Bloom Filters:** Quick checking if an item might be in the current top K
+- **Efficient Merging:** Using sketch properties for fast updates
+
+### 5.3. State Management
+
+**Considerations:**
+- **State Size:** Based on algorithm choice and accuracy requirements
+- **Persistence Strategy:** Periodic checkpointing and write-ahead logs
+- **Recovery Mechanism:** Ability to rebuild state from event log
+
+**Implementation Options:**
+
+1. **Embedded State:**
+   - Using Flink/Kafka Streams built-in state stores (RocksDB)
+   - Checkpointed to durable storage (S3, HDFS)
+
+2. **External State:**
+   - Redis with persistence for fast access
+   - Cassandra for distributed durable storage
+   - TimescaleDB for time-series optimized storage
+
+**State Schema (Conceptual):**
+```
+// For direct counting approach
+table heavy_hitters {
+  item_id: string [primary key]
+  window_id: string [primary key] // for windowed analysis
+  count: long
+  last_updated: timestamp
+}
+
+// For sketch-based approach
+table sketches {
+  window_id: string [primary key]
+  sketch_data: byte[] // serialized sketch
+  last_updated: timestamp
+}
+```
+
+### 5.4. Serving Layer
+
+**Technologies:** Spring Boot, Node.js, gRPC, GraphQL
+
+**Components:**
+- **Cache Manager:** Maintains hot results for frequent queries
+- **Query Processor:** Translates user queries to data store queries
+- **Consistency Controller:** Handles eventual consistency semantics
+
+**API Endpoints:**
+```
+GET /api/v1/heavy-hitters?k=10&window=last_hour
+GET /api/v1/heavy-hitters?k=100&dimension=user_agent&window=last_day
+GET /api/v1/items/{itemId}/frequency?window=last_week
+```
+
+**Response Format:**
+```json
+{
+  "results": [
+    {
+      "item": "192.168.1.1",
+      "estimated_count": 15782,
+      "error_bound": 157, // ~1% error
+      "last_updated": "2025-06-01T10:32:15Z"
+    },
+    {...}
+  ],
+  "metadata": {
+    "window_start": "2025-06-01T09:32:15Z",
+    "window_end": "2025-06-01T10:32:15Z",
+    "consistency_lag": "PT2M15S", // ISO-8601 duration format
+    "accuracy": "approximate"
+  }
+}
+```
+
+## 6. Eventual Consistency Implementation
+
+### 6.1. Consistency Model
+
+The system implements an eventually consistent model with the following guarantees:
+
+1. **Bounded Staleness:** Results will reflect all events processed within X minutes (configurable, typically 1-5 minutes)
+2. **Monotonic Reads:** Once a client sees a particular result, subsequent queries will not return older results
+3. **Read-Your-Writes Consistency:** Updates from a client will be visible to that client's subsequent reads
+
+### 6.2. Consistency Implementation Techniques
+
+#### 6.2.1. In Kappa Architecture
+
+- **Watermarking:** Track event time progress to handle late-arriving data
+- **Versioned State:** Tag state updates with monotonically increasing versions
+- **State Synchronization:** Periodically synchronize state across processing nodes
+- **Consistency Metadata:** Include timestamp and version information in query responses
+
+**Watermarking Configuration (Flink Example):**
+```java
+DataStream<Event> events = env.addSource(kafkaConsumer)
+    .assignTimestampsAndWatermarks(
+        WatermarkStrategy
+            .<Event>forBoundedOutOfOrderness(Duration.ofMinutes(1))
+            .withTimestampAssigner((event, timestamp) -> event.getTimestamp())
+    );
+```
+
+#### 6.2.2. In Delta Architecture
+
+- **Version Tracking:** Each delta state and base state has a version
+- **Atomic Updates:** Delta merges are atomic operations
+- **Conflict Resolution:** Clear policies for handling conflicting updates
+- **Read Routing:** Direct reads to appropriate state version based on consistency requirements
+
+### 6.3. Consistency Guarantees and SLAs
+
+- **Time-Bounded Consistency:** All events will be reflected in query results within 5 minutes of ingestion
+- **Accuracy SLA:** 99% accurate for items with frequency > 0.1% of total stream
+- **Freshness Indicator:** Each query response includes metadata about data freshness
+
+## 7. Fault Tolerance and Reliability
+
+### 7.1. Failure Scenarios and Mitigations
+
+1. **Processing Node Failure:**
+   - Automatic failover to standby nodes
+   - State recovery from checkpoints or event log replay
+   - Parallel processing ensures partial availability during recovery
+
+2. **Ingestion Layer Failure:**
+   - Replicated log ensures no data loss (e.g., Kafka with replication factor 3)
+   - Producers buffer data during brief outages
+   - Multiple ingestion points for high availability
+
+3. **State Store Failure:**
+   - Regular backups of state
+   - Read replicas for high availability
+   - Automatic failover for primary state storage
+
+4. **Network Partitions:**
+   - Clearly defined behavior during partitions (CP or AP based on component)
+   - Reconciliation procedures after partition healing
+   - Circuit breakers to prevent cascading failures
+
+### 7.2. Recovery Mechanisms
+
+**Kappa Architecture Recovery:**
+- Replay events from log for affected time windows
+- Leverage checkpoints to avoid full replay when possible
+- Parallel recovery to minimize downtime
+
+**Delta Architecture Recovery:**
+- Restore from last consistent base state
+- Apply delta updates since last base state
+- Use write-ahead logs to recover in-flight delta operations
+
+## 8. Performance Optimization
+
+### 8.1. Algorithmic Optimizations
+
+- **Sketch Dimensioning:** Tune sketch parameters based on cardinality and accuracy needs
+- **Frequency-Based Pruning:** Quickly discard items that cannot be in top K
+- **Probabilistic Counting:** Use HyperLogLog for approximate cardinality estimation
+- **Hierarchical Processing:** Local aggregation before global counting
+
+### 8.2. System Optimizations
+
+- **Data Locality:** Co-locate processing with data when possible
+- **Caching Strategy:** Multi-level caching for frequent queries
+  - L1: In-memory cache for hot results (10s of milliseconds)
+  - L2: Distributed cache for warm results (100s of milliseconds)
+- **Horizontal Scaling:** Automatic scaling based on load metrics
+- **Batch Processing Windows:** Adjust window sizes based on throughput needs
+- **Adaptive Sampling:** Dynamically adjust sampling rate based on traffic patterns
+
+## 9. Monitoring and Observability
+
+### 9.1. Key Metrics
+
+**System Health:**
+- Throughput (events/second) per processing node
+- Processing latency (ingestion to result availability)
+- Error rates and types
+- Resource utilization (CPU, memory, network)
+
+**Data Quality:**
+- Estimated error bounds for top K items
+- Consistency lag (processing delay)
+- Cardinality of unique items
+- Distribution of frequency counts
+
+### 9.2. Monitoring Implementation
+
+**Technologies:** Prometheus, Grafana, ELK Stack, DataDog
+
+**Dashboard Components:**
+- System health overview
+- Data flow visualization
+- Consistency and accuracy metrics
+- Top K items visualization
+- Alerting thresholds
+
+**Anomaly Detection:**
+- Sudden shifts in cardinality
+- Unexpected changes in top K composition
+- Processing pipeline stalls
+- Abnormal error rates
+
+## 10. Implementation Examples
+
+### 10.1. Kappa Architecture with Flink and Count-Min Sketch
+
+```java
+// Apache Flink implementation with Count-Min Sketch
+public class TopKHeavyHittersJob {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        
+        // Configure checkpointing for fault tolerance
+        env.enableCheckpointing(60000); // 60 seconds
+        env.getCheckpointConfig().setMinPauseBetweenCheckpoints(30000);
+        
+        // Source: Kafka consumer
+        Properties kafkaProps = new Properties();
+        kafkaProps.setProperty("bootstrap.servers", "kafka:9092");
+        kafkaProps.setProperty("group.id", "heavy-hitters-processor");
+        
+        FlinkKafkaConsumer<Event> consumer = new FlinkKafkaConsumer<>(
+            "events", new EventDeserializationSchema(), kafkaProps);
+        consumer.assignTimestampsAndWatermarks(
+            WatermarkStrategy.<Event>forBoundedOutOfOrderness(Duration.ofMinutes(1))
+                .withTimestampAssigner((event, timestamp) -> event.getTimestamp()));
+        
+        DataStream<Event> events = env.addSource(consumer);
+        
+        // Extract items from events
+        DataStream<Item> items = events.map(event -> event.extractItem());
+        
+        // Process with Count-Min Sketch and maintain Top K
+        items.keyBy(item -> item.getWindow()) // Group by window
+            .process(new HeavyHitterProcessor(K, DELTA, EPSILON))
+            .addSink(new StateStoreSink()); // Write to state store
+            
+        env.execute("Top K Heavy Hitters");
+    }
+    
+    // Custom ProcessFunction implementing Count-Min Sketch with Space-Saving
+    public static class HeavyHitterProcessor 
+            extends KeyedProcessFunction<String, Item, TopKResult> {
+        private final int k;
+        private final double delta;
+        private final double epsilon;
+        
+        private transient CountMinSketch cms;
+        private transient SpaceSaving<String> spaceSaving;
+        private transient ValueState<Long> totalCountState;
+        
+        // Implementation details omitted for brevity
+        // 1. Initialize CMS and Space-Saving in open() method
+        // 2. Update sketches in processElement()
+        // 3. Emit top K in onTimer() based on watermark
+    }
+}
+```
+
+### 10.2. Delta Architecture with Spark and Incremental Updates
+
+```python
+# PySpark Structured Streaming implementation with Delta Lake
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import *
+from delta.tables import *
+
+# Initialize Spark session
+spark = SparkSession.builder \
+    .appName("TopKHeavyHittersDelta") \
+    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
+    .getOrCreate()
+
+# Read stream from Kafka
+stream_df = spark.readStream \
+    .format("kafka") \
+    .option("kafka.bootstrap.servers", "kafka:9092") \
+    .option("subscribe", "events") \
+    .option("startingOffsets", "latest") \
+    .load()
+
+# Parse events and extract items
+parsed_df = stream_df.select(
+    from_json(col("value").cast("string"), event_schema).alias("event")) \
+    .select("event.item", "event.timestamp")
+
+# Create windowed counts
+windowed_counts = parsed_df \
+    .withWatermark("timestamp", "1 minute") \
+    .groupBy(window(col("timestamp"), "5 minutes"), col("item")) \
+    .count()
+
+# Delta Lake - Incremental update to base table
+query = windowed_counts.writeStream \
+    .format("delta") \
+    .outputMode("update") \
+    .option("checkpointLocation", "s3://bucket/checkpoints/heavy-hitters") \
+    .foreachBatch(update_heavy_hitters_table) \
+    .trigger(processingTime="1 minute") \
+    .start()
+
+# Function to update the heavy hitters table
+def update_heavy_hitters_table(batch_df, batch_id):
+    # Create or reference Delta table
+    delta_table = DeltaTable.forPath(spark, "s3://bucket/tables/heavy-hitters")
+    
+    # Merge new counts with existing table
+    delta_table.alias("target") \
+        .merge(batch_df.alias("updates"), \
+               "target.window = updates.window AND target.item = updates.item") \
+        .whenMatched().updateExpr({"count": "target.count + updates.count"}) \
+        .whenNotMatched().insertExpr({
+            "window": "updates.window",
+            "item": "updates.item",
+            "count": "updates.count",
+            "last_updated": "current_timestamp()"
+        }) \
+        .execute()
+    
+    # Optionally: Cleanup old windows to maintain table size
+    delta_table \
+        .delete("window.end < current_timestamp() - INTERVAL 7 DAYS")
+```
+
+## 11. Comparing Kappa and Delta Architectures for This Problem
+
+### 11.1. Kappa Architecture Advantages
+
+- **Simplicity:** Single processing path for all data
+- **Real-time Focus:** Better suited for truly real-time heavy hitter detection
+- **Stateful Processing:** Native support for windowed aggregations
+- **Seamless Recovery:** Event log allows complete state reconstruction
+
+### 11.2. Delta Architecture Advantages
+
+- **Efficiency:** Only processes changes, reducing computational load
+- **Storage Optimization:** Can store compressed base state with incremental updates
+- **Query Performance:** Often faster queries on the merged state
+- **Historical Analysis:** Better support for point-in-time queries
+
+### 11.3. Selection Criteria
+
+**Choose Kappa Architecture when:**
+- Low-latency requirements are paramount
+- Event volumes are manageable with stream processing
+- System simplicity is prioritized over storage efficiency
+- Full reprocessing capability is important
+
+**Choose Delta Architecture when:**
+- Storage efficiency is a major concern
+- Historical queries are as important as recent data
+- Event volume is extremely high
+- Batch processing resources are already available
+
+## 12. Conclusion
+
+An eventually consistent Top K Heavy Hitters system can be effectively implemented using either Kappa or Delta Architecture, with the choice depending on specific requirements around latency, storage efficiency, and query patterns.
+
+Both architectures enable scalable, fault-tolerant processing of massive data streams to identify heavy hitters, with clearly defined eventual consistency guarantees. The selection of appropriate probabilistic data structures (like Count-Min Sketch or Space-Saving) further enhances the system's efficiency while maintaining acceptable accuracy bounds.
+
+By carefully designing the ingestion, processing, state management, and serving layers, and implementing robust monitoring and fault tolerance mechanisms, such a system can meet demanding production requirements while providing valuable insights from high-volume data streams.
+
+## 13. References
+
+1. Cormode, G., & Hadjieleftheriou, M. (2010). Finding the frequent items in streams of data. Communications of the ACM, 53(1), 97-105.
+2. Cormode, G., & Muthukrishnan, S. (2005). An improved data stream summary: the count-min sketch and its applications. Journal of Algorithms, 55(1), 58-75.
+3. Metwally, A., Agrawal, D., & El Abbadi, A. (2005). Efficient computation of frequent and top-k elements in data streams. In Database Theory - ICDT 2005.
+4. Kreps, J. (2014). Questioning the Lambda Architecture. O'Reilly Media.
+5. Kleppmann, M. (2017). Designing Data-Intensive Applications. O'Reilly Media.
+6. Apache Flink Documentation: https://flink.apache.org/
+7. Delta Lake Documentation: https://delta.io/

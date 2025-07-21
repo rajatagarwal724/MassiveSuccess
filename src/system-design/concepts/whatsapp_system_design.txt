@@ -1,0 +1,307 @@
+# WhatsApp System Design
+
+## 1. Requirements Clarification
+    - Functional Requirements:
+        - 1:1 private chat
+        - Group chats
+        - Media sharing (images, videos, documents)
+        - Status updates (text, image, video)
+        - Read receipts (sent, delivered, read)
+        - Last seen online status
+        - Typing indicators
+        - End-to-End Encryption (E2EE)
+        - User profiles (name, picture, about)
+        - Contact synchronization
+    - Non-Functional Requirements:
+        - High Availability: System should be operational 99.99% of the time.
+        - Low Latency: Messages delivered in near real-time (e.g., < 200ms for most messages).
+        - Scalability: Support billions of users and trillions of messages.
+        - Reliability: Messages should not be lost.
+        - Durability: Data should be persistent.
+        - Security: E2EE for messages, secure communication channels.
+        - Consistency: Eventual consistency for read receipts, last seen across devices. Stronger consistency for message delivery.
+    - Extended Requirements (Out of Scope for initial design but good to mention):
+        - Voice and Video calls
+        - Payments
+        - Business accounts
+
+## 2. Capacity Estimation and Constraints
+    - Active Users: ~2 Billion Daily Active Users (DAU)
+    - Messages per user per day: ~40 messages
+    - Total messages per day: 2B * 40 = 80 Billion messages
+    - Peak messages per second (QPS): (80B / 24 / 3600) * 2 (peak factor) ~= 1.85M messages/sec
+    - Media Sharing: Assume 20% of messages contain media, average media size 1MB.
+        - Daily media uploads: 80B * 0.20 = 16 Billion media items
+        - Daily media storage: 16B * 1MB = 16 PB/day
+        - Total media storage over 5 years: 16PB * 365 * 5 = ~29 EB (Exabytes)
+    - Text Message Size: Average 100 bytes.
+        - Daily text storage: 80B * (1 - 0.20) * 100 bytes = 6.4 TB/day
+    - Read Receipts/Status Updates: Similar scale to messages.
+    - Bandwidth: Significant for media.
+    - Connections: Billions of concurrent connections.
+
+## 3. High-Level Design
+    - Client-Server Architecture: Clients (mobile, web) connect to backend servers.
+    - Connection Management:
+        - Persistent connections (WebSockets preferred over long polling for efficiency).
+        - Connection Gateways/Servers to handle client connections.
+    - Message Queues: (e.g., Kafka, RabbitMQ) for decoupling services, buffering messages, ensuring reliability.
+    - Databases:
+        - NoSQL for messages (e.g., Cassandra, HBase) for high write throughput, scalability.
+        - SQL/NoSQL for user metadata, group info (e.g., MySQL, Cassandra).
+    - Core Services:
+        - Authentication Service
+        - Presence Service (online/offline, last seen, typing)
+        - Message Routing/Chat Service
+        - Media Storage Service
+        - Notification Service (for offline users)
+        - Group Management Service
+
+## 4. Detailed Component Design
+
+    ### 4.1. Client
+        - UI/UX for chat, status, calls.
+        - Local Database (SQLite) for caching messages, contacts, user settings.
+        - E2EE Implementation (Signal Protocol libraries).
+        - Connection Manager: Handles WebSocket connection, retries, heartbeats.
+        - Media Handler: Uploads/downloads media, compression.
+
+    ### 4.2. Connection/Gateway Servers
+        - Maintain persistent TCP/IP (WebSocket) connections with clients.
+        - Authenticate clients.
+        - Receive messages from clients and forward to Chat Servers (via Message Queue).
+        - Receive messages from Chat Servers and deliver to online clients.
+        - Handle heartbeats to detect disconnections.
+        - Scalable horizontally.
+
+    ### 4.3. Chat/Message-Routing Servers
+        - Core logic for message processing and routing.
+        - Store messages in temporary queues if recipient is offline.
+        - Coordinate with Presence Service.
+        - Handle 1:1 and group message logic.
+        - Generate message IDs.
+        - Push messages to Message Queues for persistence and further processing.
+
+    ### 4.4. Presence Servers
+        - Manage user online/offline status, last seen, typing indicators.
+        - Clients send presence updates (e.g., "online", "typing in chat X").
+        - Broadcast presence updates to relevant subscribed clients.
+        - Highly scalable, low latency. Can use a distributed cache (e.g., Redis).
+
+    ### 4.5. Media Servers / Storage Service
+        - Handle upload/download of media files (images, videos, docs).
+        - Store media files in Object Storage (e.g., AWS S3, HDFS).
+        - Store metadata (URL, type, size, uploader) in a database, linked to messages.
+        - Use CDNs to serve media content closer to users for faster downloads.
+        - Generate thumbnails.
+
+    ### 4.6. Authentication & Authorization Service
+        - User registration, login, session management.
+        - Secure password/credential storage.
+        - OAuth or similar for third-party integrations if any.
+
+    ### 4.7. Notification Service
+        - Send push notifications (APNS, FCM) to offline users when they receive new messages or calls.
+        - Manages device tokens.
+
+    ### 4.8. Group Management Service
+        - Create/delete groups, add/remove members, admin roles.
+        - Store group metadata.
+        - Handle group message fan-out logic.
+
+    ### 4.9. Database Schema (Illustrative)
+        - Users: UserID (PK), PhoneNumber, Name, ProfilePicURL, StatusText, CreatedAt, LastSeenAt.
+        - Messages: MessageID (PK), ChatID (or SenderID+ReceiverID for 1:1), SenderID, Content (encrypted), MediaType, MediaURL, Timestamp, Status (Sent, Delivered, Read).
+        - Chats/Conversations: ChatID (PK), Type (1:1, Group), LastMessageID, CreatedAt.
+        - GroupMembers: GroupID (FK), UserID (FK), Role (Admin, Member), JoinedAt.
+        - Media: MediaID (PK), MessageID (FK), S3_URL, Type, Size, UploadedAt.
+        - UserConnections: UserID (PK), GatewayServerID, DeviceID, LastHeartbeat.
+
+    ### 4.10. Key API Endpoints (Illustrative REST/WebSocket messages)
+        - User:
+            - POST /v1/users/register {phone_number, name}
+            - POST /v1/users/login {phone_number, otp}
+            - PUT /v1/users/me/profile {name, picture_url, status_text}
+            - GET /v1/users/{user_id}/profile
+        - Messaging (WebSocket events):
+            - SEND_MESSAGE {to_user_id/group_id, content, type, client_message_id}
+            - RECEIVE_MESSAGE {from_user_id, content, type, server_message_id, timestamp}
+            - UPDATE_MESSAGE_STATUS {message_id, status (delivered, read)}
+        - Presence (WebSocket events):
+            - UPDATE_PRESENCE {status (online, offline, typing_in_chat_id)}
+            - PRESENCE_NOTIFICATION {user_id, status, last_seen}
+        - Media:
+            - POST /v1/media/upload -> returns {media_id, upload_url}
+            - GET /v1/media/{media_id} -> redirects to CDN URL
+        - Groups:
+            - POST /v1/groups {name, members_user_ids}
+            - POST /v1/groups/{group_id}/members {user_id_to_add}
+            - DELETE /v1/groups/{group_id}/members/{user_id_to_remove}
+
+## 5. Message Flow
+
+    ### 5.1. User A sends a message to User B (User B online)
+        1. User A's client: Encrypts message, sends to its connected Gateway Server (GS-A) via WebSocket.
+        2. GS-A: Receives message, authenticates, forwards to a Message Queue (MQ-Ingress).
+        3. Chat Server (CS): Consumes message from MQ-Ingress.
+            - Generates unique MessageID.
+            - Stores message in persistent DB (e.g., Cassandra). Marks as "Sent".
+            - Checks Presence Service for User B's status and connected Gateway Server (GS-B).
+            - If User B is online, CS sends message to GS-B (directly or via another MQ-Egress).
+        4. GS-B: Receives message, forwards to User B's client via WebSocket.
+        5. User B's client: Decrypts message, displays it. Sends "Delivered" ack back to GS-B.
+        6. "Delivered" Ack Flow: GS-B -> MQ -> CS -> DB (update message status) -> MQ -> GS-A -> User A's client.
+        7. User B reads message: Client sends "Read" ack. Similar flow to "Delivered" ack.
+
+    ### 5.2. User A sends a message to User B (User B offline)
+        1-3. Same as above. CS stores message in DB.
+        4. CS: Checks Presence Service. User B is offline.
+            - CS sends message to Notification Service.
+        5. Notification Service: Sends push notification (FCM/APNS) to User B's device.
+        6. When User B comes online:
+            - Client connects to a GS, syncs messages (pulls unread messages from server based on last sync timestamp or message ID).
+
+    ### 5.3. Group Messages
+        1. Sender (User A) sends message to Group G: Client -> GS-A -> MQ-Ingress -> CS.
+        2. CS:
+            - Stores message in DB.
+            - Fetches member list of Group G from Group Management Service/DB.
+            - For each online member: Forwards message to their respective GS.
+            - For each offline member: Triggers push notification via Notification Service.
+        3. Fan-out can be optimized (e.g., CS publishes to a group-specific topic in MQ, and GSs subscribed to relevant users in that group pick it up).
+
+    ### 5.4. Read Receipts / Status Updates
+        - Client sends status update (e.g., "message_id_X read") to its GS.
+        - GS -> MQ -> CS.
+        - CS updates message status in DB.
+        - CS sends status update notification to original sender's GS (if online).
+        - Original sender's client updates UI.
+
+## 6. Data Storage
+
+    ### 6.1. Message Data (Chat History)
+        - NoSQL Database (e.g., Cassandra, HBase) optimized for high write throughput and horizontal scalability.
+        - Partition Key: ChatID (or UserID for 1:1 chats if denormalized).
+        - Clustering Key: Timestamp (or MessageID if it's time-sortable like a KSUID/ULID). Allows fetching messages in chronological order for a chat.
+        - Data includes: SenderID, ReceiverID/GroupID, EncryptedContent, MediaMetadataID, Timestamp, Status.
+        - TTL for messages? (WhatsApp stores history indefinitely on device, server-side might be different or only recent).
+
+    ### 6.2. User Metadata
+        - SQL (e.g., MySQL, PostgreSQL) or NoSQL (e.g., Cassandra, DynamoDB).
+        - UserID (PK), PhoneNumber, Name, ProfilePicURL, StatusText, E2E_PublicKeys, Contacts.
+        - Can be sharded by UserID.
+
+    ### 6.3. Group Metadata
+        - SQL or NoSQL.
+        - GroupID (PK), Name, IconURL, MembersList (can be separate table GroupMembers: GroupID, UserID, Role).
+        - Sharded by GroupID.
+
+    ### 6.4. Media Files
+        - Object Storage (e.g., AWS S3, Google Cloud Storage, MinIO).
+        - Highly durable, scalable, cost-effective for large binary files.
+        - Files named by a unique ID (e.g., UUID, hash of content).
+        - URLs stored in message metadata.
+
+    ### 6.5. Caching
+        - Distributed Cache (e.g., Redis, Memcached).
+        - User sessions and connection info (UserID -> GatewayServerID mapping).
+        - Presence status (UserID -> online/offline, last_seen, typing_in_chat_id).
+        - Hot/Recent chat messages (to reduce DB load for active chats).
+        - Group member lists.
+        - User profiles.
+
+## 7. Scalability and Performance
+
+    ### 7.1. Horizontal Scaling
+        - All services (Gateway, Chat, Presence, Media, Auth, Notification) designed to be stateless or share state via distributed cache/DB, allowing addition of more instances.
+        - Load Balancers (L4/L7) in front of each service tier.
+
+    ### 7.2. Database Sharding
+        - User Data: Shard by UserID.
+        - Message Data: Shard by ChatID or UserID. Consistent hashing for mapping ID to shard.
+        - Group Data: Shard by GroupID.
+
+    ### 7.3. Connection Management Scaling
+        - Millions of concurrent connections. Gateway servers are critical.
+        - Efficient connection multiplexing on servers (e.g., using epoll/kqueue).
+        - Service discovery for clients to find least-loaded Gateway servers.
+
+    ### 7.4. CDN for Media
+        - Distribute media content globally to reduce latency for downloads.
+
+    ### 7.5. Message Queues for Asynchronous Processing
+        - Decouple services, absorb traffic spikes, improve fault tolerance.
+
+    ### 7.6. Optimizing Message Fan-out for Groups
+        - Instead of Chat Server sending N messages for a group of N, it can publish once to a group-specific topic. Gateway servers or specialized fan-out services subscribe.
+
+## 8. Reliability and Fault Tolerance
+
+    ### 8.1. Message Delivery Guarantees
+        - At-least-once delivery: Achieved through ACKs and retries at each step (client-GS, GS-CS, CS-DB, CS-GS, GS-client).
+        - Idempotency for message processing to handle retries safely (using unique message IDs).
+
+    ### 8.2. Data Replication and Backups
+        - Databases replicated across multiple availability zones/regions.
+        - Regular backups of all persistent data.
+        - Object storage provides built-in durability.
+
+    ### 8.3. Service Discovery and Health Checks
+        - Services register with a discovery service (e.g., Consul, ZooKeeper, etcd).
+        - Load balancers use health checks to route traffic only to healthy instances.
+        - Automatic failover for stateful services if possible.
+
+    ### 8.4. No Single Point of Failure (SPOF)
+        - Redundancy for all components.
+
+    ### 8.5. Graceful Degradation
+        - If some non-critical features fail (e.g., status updates), core messaging should still work.
+
+## 9. Security
+
+    ### 9.1. End-to-End Encryption (E2EE)
+        - Signal Protocol is standard.
+        - Only sender and recipient(s) can decrypt messages. Server only sees encrypted blobs.
+        - Key management is crucial: public key exchange, identity verification.
+
+    ### 9.2. Secure Communication Channels
+        - TLS/SSL for all client-server and server-server communication.
+
+    ### 9.3. Authentication and Authorization
+        - Strong authentication (e.g., OTP via SMS for registration).
+        - Secure session management.
+
+    ### 9.4. Spam and Abuse Detection
+        - Rate limiting, heuristics, user reporting.
+
+    ### 9.5. Data at Rest Encryption
+        - Encrypt sensitive data in databases and object storage (in addition to E2EE for message content).
+
+## 10. Specific Features Deep Dive
+
+    ### 10.1. Group Chat
+        - Metadata: Group name, icon, members, roles (admin, member).
+        - Message Fan-out: As discussed in Message Flow and Scalability.
+        - Permissions: Only admins can add/remove members, change group info.
+
+    ### 10.2. Status Updates ("Stories")
+        - Similar to media sharing but ephemeral (e.g., 24-hour visibility).
+        - Separate storage, possibly with TTL.
+        - Access control list (who can see the status).
+        - Fan-out to contacts who are allowed to see.
+
+    ### 10.3. "Last Seen" and Typing Indicators
+        - Managed by Presence Service.
+        - Client sends "typing_started" event to server when user types in a chat.
+        - Server broadcasts this to other participant(s) in that chat.
+        - "typing_stopped" event or timeout.
+        - Last seen: Updated when user is active or disconnects. Privacy settings apply.
+
+## 11. Trade-offs and Optimizations
+
+    - Consistency vs. Availability: Eventual consistency for non-critical features like "last seen" or "read receipts" to improve availability and performance. Stronger consistency for message delivery.
+    - Push vs. Pull for messages: Push (WebSocket) for real-time delivery. Pull for message history sync when client reconnects.
+    - Storing all messages on server vs. client-centric storage: WhatsApp historically relied heavily on client storage, with server acting more as a relay. Modern approach involves server-side storage for multi-device sync and history.
+    - Media processing: On-the-fly compression/transcoding vs. pre-processing.
+    - Choice of Message ID: UUID vs. KSUID/ULID (time-sortable) vs. Snowflake.
+    - Database choice: SQL vs. NoSQL for different types of data based on access patterns, scalability needs.

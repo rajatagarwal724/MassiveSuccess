@@ -1,0 +1,164 @@
+# System Design: Facebook Post Search by Keywords
+
+## 1. Requirements
+
+### Functional Requirements:
+*   Search posts using one or more keywords.
+*   Support for basic query operations (e.g., AND for multiple keywords).
+*   Sort search results by:
+    *   Creation Time (descending - newest first, or ascending - oldest first).
+    *   Interaction Count (e.g., likes, comments, shares - descending - most popular first).
+*   Pagination for search results.
+*   Near real-time indexing of new posts and updates to interaction counts.
+
+### Non-Functional Requirements:
+*   **Scalability:** Handle billions of posts, trillions of interactions, and millions of search queries per second (QPS).
+*   **Low Latency:** Search results should be delivered quickly (e.g., p99 < 500ms).
+*   **High Availability:** The search system must be resilient to failures.
+*   **Durability:** Indexed data should not be lost.
+*   **Consistency:** Eventual consistency for new posts and interaction updates in the search index is generally acceptable. Fresher interaction counts are desirable for sorting by popularity.
+*   **Relevance (Basic):** Keyword matching is the primary focus. Advanced relevance is out of scope for this specific request but crucial in a real system.
+
+## 2. High-Level Architecture
+
+The system consists of two main flows: the **Indexing Pipeline** (getting data into the search system) and the **Query Pipeline** (serving search requests).
+
+```
++-------------------+     +----------------------+     +---------------------+
+|   Post Creation/  | --> | Distributed Message  | --> |  Indexing Service   |
+| Interaction Events|     | Queue (e.g., Kafka)  |     | (Stream Processing) |
++-------------------+     +----------------------+     +----------+----------+
+                                                                 |
+                                                                 v
++-------------------+     +----------------------+     +---------------------+
+| Interaction Count | <-- | Real-time Counter    |     |   Search Index      |
+| Updates           |     | Service (for sorting)|     | (e.g., Elasticsearch|
++-------------------+     +----------------------+     |   Solr, Unicorn)    |
+                                                       +----------+----------+
+                                                                 ^
+                                                                 |
++-------------------+     +----------------------+     +---------------------+
+|   User Search     | --> |   Query Service      | --> |   Query Aggregator/ |
+|   Request         |     | (API, Parsing, Plan) |     |   Ranker            |
++-------------------+     +----------------------+     +---------------------+
+```
+
+## 3. Detailed Component Design
+
+### 3.1. Data Sources & Ingestion
+
+*   **Post Data:**
+    *   When a user creates or edits a post, it's written to a primary, highly available, and durable database (e.g., sharded MySQL, Cassandra).
+    *   An event (containing the post ID, content, creation time, user ID, privacy info) is published to a distributed message queue (e.g., Kafka).
+*   **Interaction Data (Likes, Comments, Shares):**
+    *   These are high-frequency events.
+    *   Each interaction is recorded in a **Real-time Counter Service** (see 3.4).
+    *   Events for significant interaction count changes (or periodic snapshots) for a post are also published to a Kafka topic for the indexing service to update the search index's interaction score.
+
+### 3.2. Indexing Pipeline
+
+*   **Distributed Message Queue (e.g., Kafka):**
+    *   Separate topics for `new_posts`, `updated_posts`, and `post_interaction_updates`.
+    *   Ensures decoupling, durability, and ordered processing for indexing.
+*   **Indexing Service (Stream Processors - e.g., Flink, Spark Streaming, custom services):**
+    *   Consumers read from Kafka topics.
+    *   **Text Processing:**
+        *   Tokenization (breaking text into terms).
+        *   Normalization (lowercase, stemming, lemmatization).
+        *   Stop-word removal.
+    *   **Document Preparation:** For each post, a search document is created/updated:
+        *   `post_id`: Unique identifier.
+        *   `user_id`: Author's ID.
+        *   `content_tokens`: Indexed terms from the post content.
+        *   `creation_time_ts`: Timestamp (numeric, for sorting and range queries).
+        *   `interaction_count_approx`: Numeric (periodically updated approximate interaction count for coarse ranking/filtering within the index).
+        *   `privacy_metadata`: To filter results based on visibility.
+        *   Other filterable fields (e.g., location tags, post type).
+    *   **Index Update:** Processed documents are written to the Search Index.
+
+### 3.3. Search Index
+
+*   **Technology:** A distributed search engine like Elasticsearch, Apache Solr, or a custom-built solution (Facebook uses "Unicorn").
+*   **Core Structure: Inverted Index:**
+    *   Maps terms (keywords) to a list of `post_id`s containing that term.
+    *   Example: `{"holiday" -> [post_1, post_5, post_100], "beach" -> [post_5, post_200]}`
+*   **Document Store (Forward Index):** Stores the actual fields of the indexed documents (`post_id`, `creation_time_ts`, `interaction_count_approx`, snippets of content for display). This might be part of the search engine or a separate fast key-value store.
+*   **Sharding:** The index is sharded (partitioned) horizontally across many nodes to distribute data and load. Sharding strategy could be based on `post_id` hash, time (e.g., monthly indexes), or a composite key.
+*   **Replication:** Each shard is replicated for fault tolerance and read scalability.
+*   **Specific Indexing for Sorting:**
+    *   `creation_time_ts`: Indexed as a numeric/date type to allow efficient range queries and sorting.
+    *   `interaction_count_approx`: Indexed as a numeric type. This is an approximation used for initial candidate retrieval or if real-time fetching (3.4) is too slow for the entire result set.
+
+### 3.4. Real-time Counter Service
+
+*   **Purpose:** To maintain near real-time, accurate interaction counts (likes, comments, shares) for each post. This is crucial for accurate sorting by "interaction count".
+*   **Technology:** A highly scalable distributed counter system (similar to Netflix's design, or using systems like Redis clusters with atomic increments, or a specialized time-series database/KV store optimized for counters like Cassandra counters).
+*   **Operations:**
+    *   `IncrementInteraction(post_id, interaction_type)`
+    *   `GetInteractionCounts(post_id)`: Returns current likes, comments, shares for a post.
+*   **Updates to Search Index:** This service can periodically push updates for highly active posts to the `post_interaction_updates` Kafka topic, or the Indexing Service can poll it for changes to update the `interaction_count_approx` in the main search index.
+
+### 3.5. Query Pipeline
+
+*   **API Gateway / Load Balancers:** Entry point for search queries, distributing load to Query Services.
+*   **Query Service:**
+    *   **Request Handling:** Receives HTTP requests with keywords, sort parameters (`sort_by=[creation_time|interactions]`, `order=[asc|desc]`), pagination info, and user context (for privacy).
+    *   **Query Parsing & Analysis:**
+        *   Parses keywords.
+        *   Identifies filters and sort preferences.
+    *   **Query Planning:** Determines which shards to query, how to combine results, and how to apply sorting.
+*   **Query Aggregator / Ranker:**
+    *   **Fan-out:** The parsed query is sent to all relevant shards of the Search Index.
+    *   **Keyword Matching (from Inverted Index):** Each shard returns a list of matching `post_id`s.
+    *   **Candidate Set Generation:** The aggregator combines results from shards to get a candidate set of `post_id`s.
+    *   **Fetching Data for Sorting & Display:**
+        *   Retrieves `creation_time_ts` and `interaction_count_approx` (and other display fields) for candidate posts from the Search Index's document store.
+    *   **Sorting Logic:**
+        *   **Sort by `creation_time`:** Sorts the candidate set using the `creation_time_ts` field from the search index.
+        *   **Sort by `interaction_count` (Preferred Method for Accuracy):**
+            1.  For the top N candidates (e.g., top 1000-5000 based on `interaction_count_approx` or a basic relevance score if available), fetch the *latest* interaction counts from the **Real-time Counter Service**. This is a crucial step for accuracy.
+            2.  Re-sort these N candidates using the fresh interaction counts.
+            *   *Alternative for less strict freshness:* Sort directly using `interaction_count_approx` from the search index if the periodic updates are deemed sufficient.
+    *   **Applying Privacy:** Filter out posts the searching user is not allowed to see.
+    *   **Pagination:** Apply limit and offset to the final sorted list.
+    *   **Response Formatting:** Prepare the search results (snippets, author info, actual interaction counts, creation time).
+
+## 4. Scalability & Performance Strategies
+
+*   **Horizontal Scaling:** All components (Kafka, Indexing Service, Search Index, Counter Service, Query Service) are designed to scale horizontally by adding more nodes.
+*   **Caching:**
+    *   **Query Result Cache:** Cache results for popular or identical queries.
+    *   **Document Cache:** Cache frequently accessed post data/snippets.
+    *   **Interaction Count Cache:** The Query Service can cache interaction counts fetched from the Real-time Counter Service for a short TTL.
+*   **Index Tiers:** For very large historical data, consider tiered storage for the Search Index (e.g., hot tier for recent/active posts on SSDs, cold tier for older posts on cheaper storage). Queries might span tiers.
+*   **Asynchronous Operations:** Indexing is asynchronous to post creation.
+*   **Efficient Data Structures:** Use of inverted indexes is key for fast keyword lookup.
+*   **Connection Pooling & Batching:** For all inter-service communication.
+
+## 5. Data Management & Consistency
+
+*   **Post Data:** Strong consistency in the primary post database.
+*   **Interaction Counts:** The Real-time Counter Service aims for high availability and eventual consistency (though often very fast convergence). Atomic operations are key.
+*   **Search Index:** Eventual consistency. There will be a small delay between a post being created/updated and it appearing/changing in search results. This is generally acceptable for search.
+*   **Data Retention & Archival:** Policies for how long posts remain in the "hot" search index vs. an archive.
+
+## 6. Fault Tolerance
+
+*   **Replication:** All stateful services (Kafka, Search Index, Counter Service, primary DBs) use replication.
+*   **Stateless Services:** Indexing and Query services can be largely stateless, making them easier to scale and replace on failure.
+*   **Circuit Breakers & Retries:** Implemented for inter-service calls.
+*   **Monitoring & Alerting:** Comprehensive monitoring of all components for performance, errors, and availability.
+
+## 7. Summary of Sorting Mechanisms
+
+*   **By Creation Time:**
+    1.  Query inverted index for matching `post_id`s.
+    2.  Fetch `creation_time_ts` for these posts from the document store within the search index.
+    3.  Sort results based on `creation_time_ts`.
+*   **By Interaction Count:**
+    1.  Query inverted index for matching `post_id`s.
+    2.  Optionally, use `interaction_count_approx` from the search index for an initial coarse ranking or to select a top-K candidate set (e.g., top 1000 posts).
+    3.  For the selected candidates, query the **Real-time Counter Service** to get the latest, accurate interaction counts.
+    4.  Sort/re-rank the candidates based on these fresh interaction counts.
+
+This design provides a scalable and robust foundation for Facebook-scale post search with the specified sorting capabilities.

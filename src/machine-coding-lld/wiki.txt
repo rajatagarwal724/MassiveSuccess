@@ -1,0 +1,594 @@
+# Principal Engineer Machine Coding Interview Questions
+
+## Advanced System Design and Concurrency Challenges
+
+### 1. Distributed Rate Limiter
+**Problem**: Design a distributed rate limiter that can:
+- Handle millions of requests per second
+- Work across multiple service instances
+- Support different rate limit strategies (fixed window, sliding window, token bucket)
+- Ensure thread-safety and minimal performance overhead
+
+**Advanced Considerations**:
+- Implement using Redis or a distributed cache
+- Handle race conditions
+- Support dynamic rate limit configuration
+- Provide detailed metrics and logging
+
+**Key Concepts**:
+- Distributed systems
+- Concurrency control
+- Atomic operations
+- Caching strategies
+
+### 2. Scalable Message Queue with Exactly-Once Processing
+**Problem**: Create a message queue system that guarantees:
+- Exactly-once message processing
+- High throughput (100K+ messages/second)
+- Persistent storage
+- Consumer failover and message redelivery
+- Support for different message priorities
+
+**Advanced Challenges**:
+- Implement idempotent message handling
+- Design a distributed consensus mechanism
+- Handle network partitions
+- Provide strong consistency guarantees
+
+**Key Concepts**:
+- Distributed systems
+- Consensus algorithms
+- Transaction management
+- Fault tolerance
+
+### 3. Concurrent In-Memory Key-Value Store
+**Problem**: Develop a thread-safe, high-performance in-memory key-value store with:
+- O(1) read and write operations
+- Support for complex data types
+- Advanced concurrency control
+- LRU/LFU caching mechanisms
+- Support for transactions
+
+**Advanced Requirements**:
+- Implement lock-free data structures
+- Support multi-version concurrency control (MVCC)
+- Provide atomic multi-key operations
+- Implement efficient memory management
+
+**Key Concepts**:
+- Concurrent data structures
+- Lock-free programming
+- Memory optimization
+- Advanced synchronization techniques
+
+### 4. Distributed Leaderboard and Ranking System
+**Problem**: Design a real-time leaderboard system for a global gaming platform that:
+- Supports millions of concurrent users
+- Provides instant ranking updates
+- Handles high write throughput
+- Supports complex ranking algorithms
+
+**Advanced Challenges**:
+- Implement efficient ranking algorithms
+- Design a distributed scoring mechanism
+- Handle eventual consistency
+- Provide real-time updates with minimal latency
+
+**Key Concepts**:
+- Distributed caching
+- Concurrent updates
+- Scalable data structures
+- Performance optimization
+
+### 5. Advanced Scheduler with Dynamic Resource Allocation
+**Problem**: Create a sophisticated job scheduler that:
+- Supports complex scheduling algorithms
+- Handles resource-constrained environments
+- Provides preemption and priority management
+- Supports distributed execution
+
+**Advanced Requirements**:
+- Implement time-wheel scheduling
+- Design dynamic resource allocation
+- Support job dependencies
+- Provide fault tolerance and retry mechanisms
+
+**Key Concepts**:
+- Distributed scheduling
+- Resource management
+- Concurrency control
+- Fault-tolerant systems
+
+### Evaluation Criteria
+For each problem, interviewers will assess:
+1. Correctness of core implementation
+2. Concurrency and thread-safety
+3. Performance and scalability
+4. Error handling and resilience
+5. Code organization and design patterns
+6. Advanced optimization techniques
+
+### Recommended Preparation Approach
+1. Implement solutions in a systems programming language (Go, Rust, C++)
+2. Focus on lock-free and wait-free algorithms
+3. Use profiling tools to optimize performance
+4. Practice explaining design decisions
+5. Understand trade-offs between consistency, availability, and partition tolerance
+
+### Study Resources
+- "Designing Data-Intensive Applications" by Martin Kleppmann
+- "Java Concurrency in Practice" by Brian Goetz
+- Advanced distributed systems papers from Google, Facebook, and Amazon
+
+## Principal Engineer Level Solutions
+
+### 1. Distributed Rate Limiter: Detailed Solution
+
+#### 1.1 Architecture Overview
+
+```
+                   DISTRIBUTED RATE LIMITER ARCHITECTURE
+  ┌────────────────────────────────────────────────────────────────────┐
+  │                                                                    │
+  │    ┌───────────┐          ┌─────────────────────┐                  │
+  │    │ API       │          │ Rate Limit Manager  │                  │
+  │    │ Gateway   │────────▶│                     │                  │
+  │    │           │          │ ┌─────────────────┐ │     ┌─────────┐ │
+  │    └───────────┘          │ │Algorithm Module │ │     │ Redis   │ │
+  │          ▲                │ │  - Fixed Window │ │◀───▶│ Cluster │ │
+  │          │                │ │  - Sliding Window│ │     │         │ │
+  │    ┌───────────┐          │ │  - Token Bucket │ │     └─────────┘ │
+  │    │           │          │ └─────────────────┘ │                  │
+  │    │ Multiple  │◀─────────│                     │                  │
+  │    │ Service   │          │ ┌─────────────────┐ │     ┌─────────┐ │
+  │    │ Instances │          │ │ Admin Interface │ │     │Metrics  │ │
+  │    │           │          │ │ - Configure     │ │────▶│Dashboard│ │
+  │    └───────────┘          │ │ - Monitor      │ │     │         │ │
+  │                           │ └─────────────────┘ │     └─────────┘ │
+  │                           └─────────────────────┘                  │
+  │                                                                    │
+  └────────────────────────────────────────────────────────────────────┘
+```
+
+#### 1.2 Implementation Approach
+
+**Core Components:**
+
+1. **Redis-based Storage Layer**
+   - Uses Redis sorted sets and hash maps for rate tracking
+   - Leverages Redis atomic operations (INCR, EXPIRE) for thread safety
+   - Implements partitioning by key for horizontal scaling
+
+2. **Multiple Algorithm Support**
+   - Fixed Window Counter
+   - Sliding Window Log
+   - Token Bucket
+   - Leaky Bucket (optional)
+
+3. **Fault Tolerance Mechanisms**
+   - Redis clustering with automatic failover
+   - Circuit breaker pattern for graceful degradation
+   - Local fallback rate limiting when Redis is unavailable
+
+4. **Dynamic Configuration**
+   - Runtime adjustment of rate limits without restart
+   - Multiple limit tiers (IP-based, user-based, API endpoint-based)
+   - A/B testing support for limit strategies
+
+#### 1.3 Code Example: Token Bucket Implementation
+
+```java
+public class DistributedTokenBucket implements RateLimiter {
+    private final RedissonClient redissonClient;
+    private final String keyPrefix;
+    
+    // Constructor injecting dependencies
+    public DistributedTokenBucket(RedissonClient redissonClient, String keyPrefix) {
+        this.redissonClient = redissonClient;
+        this.keyPrefix = keyPrefix;
+    }
+    
+    @Override
+    public boolean allowRequest(String resourceId, String userId, int tokensRequested) {
+        String bucketKey = keyPrefix + ":" + resourceId + ":" + userId;
+        String lastRefillKey = bucketKey + ":lastRefill";
+        
+        // Execute as Lua script for atomicity
+        String luaScript = """
+            local bucketKey = KEYS[1]
+            local lastRefillKey = KEYS[2]
+            local maxTokens = tonumber(ARGV[1])
+            local refillRate = tonumber(ARGV[2])
+            local tokensRequested = tonumber(ARGV[3])
+            local now = tonumber(ARGV[4])
+            
+            -- Get current tokens and last refill time
+            local currentTokens = tonumber(redis.call('get', bucketKey) or "0")
+            local lastRefillTime = tonumber(redis.call('get', lastRefillKey) or "0")
+            
+            -- Calculate tokens to add based on time elapsed
+            local timePassed = math.max(0, now - lastRefillTime)
+            local newTokens = math.min(maxTokens, currentTokens + math.floor(timePassed * refillRate))
+            
+            -- Try to consume tokens
+            if newTokens >= tokensRequested then
+                redis.call('set', bucketKey, newTokens - tokensRequested)
+                redis.call('set', lastRefillKey, now)
+                return 1
+            else
+                -- Update tokens without consuming (important for accurate refill)
+                if newTokens > currentTokens then
+                    redis.call('set', bucketKey, newTokens)
+                    redis.call('set', lastRefillKey, now)
+                end
+                return 0
+            end
+        """;
+        
+        RScript rScript = redissonClient.getScript();
+        List<Object> keys = Arrays.asList(bucketKey, lastRefillKey);
+        RateLimitConfig config = configurationService.getConfigForResource(resourceId);
+        
+        // Execute with automatic retry on network issues
+        return executeWithRetry(() -> {
+            Long result = rScript.eval(RScript.Mode.READ_WRITE, luaScript, 
+                    RScript.ReturnType.INTEGER, keys, 
+                    config.getMaxTokens(), 
+                    config.getRefillRate(), 
+                    tokensRequested, 
+                    System.currentTimeMillis() / 1000);
+            return result == 1;
+        }, 3);
+    }
+    
+    // Retry mechanism for resilience
+    private <T> T executeWithRetry(Supplier<T> operation, int maxRetries) {
+        int attempts = 0;
+        while (attempts < maxRetries) {
+            try {
+                return operation.get();
+            } catch (RedisConnectionException e) {
+                attempts++;
+                if (attempts >= maxRetries) {
+                    // Fallback to local rate limiting
+                    return localRateLimiter.allowRequest();
+                }
+                try {
+                    Thread.sleep(attempts * 50);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new RateLimitingException("Interrupted during retry", ie);
+                }
+            }
+        }
+        throw new IllegalStateException("Should not reach here");
+    }
+}
+```
+
+#### 1.4 Performance Optimization Techniques
+
+1. **Lua Script Execution**
+   - Ensures atomic operations without multiple roundtrips
+   - Minimizes network overhead and race conditions
+
+2. **Batched Processing**
+   - Pipeline multiple rate limit checks in a single request
+   - Reduce network roundtrips for multi-resource access patterns
+
+3. **Caching Layer**
+   - Local in-memory cache for frequently accessed rate limits
+   - Two-tier expiration (soft TTL with background refresh)
+
+4. **Adaptive Rate Limiting**
+   - Automatically adjust limits based on system load
+   - Implement backpressure mechanisms during high traffic
+
+#### 1.5 Scale and Availability Considerations
+
+1. **Horizontal Scaling**
+   - Consistent hashing for Redis key distribution
+   - No cross-partition dependencies for rate limit checks
+   - Linear capacity scaling with additional Redis nodes
+
+2. **Failure Modes**
+   - Degraded mode operation during Redis unavailability
+   - Local rate limiting as fallback with eventual consistency
+   - Circuit breaker to prevent cascading failures
+
+3. **Global Rate Limiting**
+   - Redis cluster with cross-region replication
+   - Local-first checking with global coordination
+   - Conflict resolution for split-brain scenarios
+
+#### 1.6 Testing Strategy
+
+1. **Unit Testing**
+   - Mock Redis for algorithm validation
+   - Verify correct token calculation and refill logic
+
+2. **Integration Testing**
+   - Test with actual Redis instance 
+   - Validate behavior across multiple service instances
+
+3. **Performance Testing**
+   - Benchmark with simulated traffic patterns
+   - Measure p99 latency for rate limit checks
+   - Test failure scenarios and recovery
+
+4. **Chaos Testing**
+   - Simulate Redis node failures
+   - Validate behavior during network partitions
+   - Test recovery from split-brain scenarios
+
+### 2. Scalable Message Queue with Exactly-Once Processing: Detailed Solution
+
+#### 2.1 Architecture Overview
+
+```
+                     SCALABLE MESSAGE QUEUE ARCHITECTURE
+ ┌────────────────────────────────────────────────────────────────────────────┐
+ │                                                                            │
+ │  ┌────────┐     ┌───────────────────┐     ┌───────────────────────┐       │
+ │  │        │     │                   │     │                       │       │
+ │  │Producer│────▶│   Message Broker  │────▶│   Consumer Cluster    │       │
+ │  │Clients │     │                   │     │                       │       │
+ │  │        │     │ ┌───────────────┐ │     │ ┌───────────────────┐ │       │
+ │  └────────┘     │ │ Topic Manager │ │     │ │Consumer Manager   │ │       │
+ │                 │ │               │ │     │ │                   │ │       │
+ │                 │ │ -Partitioning │ │     │ │ -Worker Pool     │ │       │
+ │                 │ │ -Replication  │ │     │ │ -Load Balancing   │ │       │
+ │                 │ └───────────────┘ │     │ └───────────────────┘ │       │
+ │                 │                   │     │                       │       │
+ │  ┌────────┐     │ ┌───────────────┐ │     │ ┌───────────────────┐ │       │
+ │  │        │     │ │Message Storage│ │     │ │Deduplication &    │ │       │
+ │  │Admin   │────▶│ │               │ │     │ │Exactly-Once        │ │       │
+ │  │Console │     │ │ -Durability   │ │     │ │Processing         │ │       │
+ │  │        │     │ │ -Retention    │ │     │ │                   │ │       │
+ │  └────────┘     │ └───────────────┘ │     │ └───────────────────┘ │       │
+ │                 └───────────────────┘     │                       │       │
+ │                                           │ ┌───────────────────┐ │       │
+ │  ┌────────┐     ┌───────────────────┐     │ │Dead Letter Queue │ │       │
+ │  │        │     │                   │     │ │& Retry Mechanism │ │       │
+ │  │Metrics │◀────│  ZooKeeper       │◀────│ │                   │ │       │
+ │  │& Alerts│     │  Coordinator      │     │ └───────────────────┘ │       │
+ │  │        │     │                   │     │                       │       │
+ │  └────────┘     └───────────────────┘     └───────────────────────┘       │
+ │                                                                            │
+ └────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 2.2 Core System Components
+
+1. **Distributed Message Broker**
+   - Partitioned topic architecture for horizontal scaling
+   - Multi-leader replication for high availability
+   - Persistent append-only log for message storage
+   - Configurable retention policies
+
+2. **Producer Library**
+   - Batched message publishing with compression
+   - Transparent failover handling
+   - Pluggable partitioning strategies
+   - Asynchronous publishing with callbacks
+
+3. **Consumer Framework**
+   - Consumer groups with dynamic balancing
+   - Cursor management for tracking consumption progress
+   - Backpressure mechanisms for overload protection
+   - Checkpoint-based recovery
+
+4. **Exactly-Once Processing Engine**
+   - Message deduplication through idempotency keys
+   - Multi-phase commit protocol for atomic updates
+   - Distributed transaction coordination
+   - Optimistic concurrency control
+
+5. **Coordination Service**
+   - ZooKeeper-based membership management
+   - Automatic partition reassignment on failures
+   - Distributed locks for critical operations
+   - Consensus-based configuration management
+
+#### 2.3 Exactly-Once Processing Implementation
+
+```java
+public class ExactlyOnceConsumer<K, V> implements MessageConsumer<K, V> {
+    private final ConsumerClient<K, V> consumerClient;
+    private final TransactionManager txManager;
+    private final IdempotencyStore idempotencyStore;
+    private final ProcessingStateStore stateStore;
+    private final MessageHandler<K, V> userHandler;
+    
+    // Atomically process messages with exactly-once semantics
+    @Override
+    public void startConsuming(String topic, String consumerGroup) {
+        consumerClient.subscribe(topic, consumerGroup);
+        
+        while (running.get()) {
+            try {
+                // Poll for messages with backpressure
+                ConsumerRecords<K, V> records = consumerClient.poll(Duration.ofMillis(100));
+                
+                // Process each batch in a transaction
+                if (!records.isEmpty()) {
+                    processBatchWithExactlyOnceSemantics(records);
+                }
+            } catch (Exception e) {
+                handleConsumptionError(e);
+            }
+        }
+    }
+    
+    private void processBatchWithExactlyOnceSemantics(ConsumerRecords<K, V> records) {
+        // Begin distributed transaction
+        TransactionContext tx = txManager.beginTransaction();
+        
+        try {
+            Map<TopicPartition, OffsetAndMetadata> offsetsToCommit = new HashMap<>();
+            
+            // Process messages and collect offsets
+            for (ConsumerRecord<K, V> record : records) {
+                String idempotencyKey = buildIdempotencyKey(record);
+                
+                // Skip already processed messages
+                if (idempotencyStore.checkAndMark(idempotencyKey, tx)) {
+                    continue;
+                }
+                
+                // Process the message inside the transaction
+                ProcessingResult result = processWithRetry(record, tx);
+                
+                if (result.isSuccessful()) {
+                    // Track position for committing
+                    TopicPartition partition = new TopicPartition(record.topic(), record.partition());
+                    offsetsToCommit.put(partition, new OffsetAndMetadata(record.offset() + 1));
+                } else {
+                    // Handle permanent failures (poison messages)
+                    handleFailedProcessing(record, result.getError());
+                    // Still mark as processed to avoid reprocessing poison messages
+                    idempotencyStore.markPermanentFailure(idempotencyKey, tx);
+                }
+            }
+            
+            // Commit transaction (includes offsets, processing results, and idempotency markers)
+            if (!offsetsToCommit.isEmpty()) {
+                // First phase: prepare
+                tx.prepare();
+                
+                // Second phase: commit all state atomically
+                tx.commit(offsetsToCommit);
+            }
+        } catch (Exception e) {
+            // Rollback on any error
+            tx.rollback();
+            throw new ProcessingException("Failed to process message batch", e);
+        }
+    }
+    
+    private ProcessingResult processWithRetry(ConsumerRecord<K, V> record, TransactionContext tx) {
+        int attempts = 0;
+        ProcessingResult result = null;
+        
+        // Retry transient failures with exponential backoff
+        while (attempts < maxRetries) {
+            try {
+                // Call user-provided message handler within transaction context
+                result = userHandler.process(record, tx);
+                if (result.isSuccessful()) {
+                    return result;
+                }
+                
+                // Check if error is retryable
+                if (!result.isRetryable()) {
+                    return result;
+                }
+                
+                attempts++;
+                // Exponential backoff with jitter
+                long backoffMs = Math.min(initialBackoffMs * (1L << attempts) + random.nextInt(100), maxBackoffMs);
+                Thread.sleep(backoffMs);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return ProcessingResult.failed(e, false);
+            } catch (Exception e) {
+                attempts++;
+                // Determine if exception is retryable
+                if (!isRetryableException(e) || attempts >= maxRetries) {
+                    return ProcessingResult.failed(e, false);
+                }
+            }
+        }
+        
+        return result != null ? result : ProcessingResult.failed(
+                new MaxRetriesExceededException("Exceeded maximum retries: " + maxRetries), false);
+    }
+    
+    private String buildIdempotencyKey(ConsumerRecord<K, V> record) {
+        // Create a unique key based on topic, partition, offset, and optionally message key
+        return String.format("%s-%d-%d-%s", record.topic(), record.partition(), record.offset(), 
+                             record.key() != null ? record.key().toString() : "null");
+    }
+    
+    private void handleFailedProcessing(ConsumerRecord<K, V> record, Throwable error) {
+        // Send to dead letter queue for later analysis
+        deadLetterQueue.send(record, error);
+        // Trigger alerts for critical failures
+        if (isCriticalError(error)) {
+            alertManager.sendAlert("Critical processing failure", record, error);
+        }
+        // Log detailed error information
+        logger.error("Failed to process message: {} with error: {}", record, error.getMessage(), error);
+    }
+}
+```
+
+#### 2.4 Scalability and Performance Techniques
+
+1. **Horizontal Scaling**
+   - Independent scaling of producers, brokers, and consumers
+   - Dynamic partition rebalancing
+   - Multi-datacenter replication
+   - Shard splitting for hot partitions
+
+2. **I/O Optimization**
+   - Sequential disk I/O for append-only logs
+   - Page cache optimization for hot messages
+   - Zero-copy transfers where supported
+   - Batched writes and reads
+
+3. **Memory Management**
+   - Off-heap message storage to avoid GC pauses
+   - Memory-mapped files for efficient access
+   - Tiered storage (memory → SSD → HDD)
+   - Elastic buffer management
+
+4. **Throughput Enhancements**
+   - Message compression (LZ4, Snappy, ZSTD)
+   - Batched acknowledgments
+   - Optimized serialization formats
+   - Priority queuing for critical messages
+
+#### 2.5 Exactly-Once Processing Mechanism
+
+1. **Message Deduplication**
+   - Unique message IDs stored in durable idempotency store
+   - TTL-based cleanup for ID history
+   - Bloom filters for memory-efficient lookup
+
+2. **Transaction Coordination**
+   - Two-phase commit protocol
+   - Transaction log for crash recovery
+   - Fencing tokens to prevent zombie instances
+
+3. **Optimistic Concurrency Control**
+   - Version-based conflict detection
+   - Automatic conflict resolution strategies
+   - Compensating transactions for cleanup
+
+4. **Failure Recovery**
+   - Automatic message redelivery on consumer failure
+   - Transaction timeout and rollback
+   - Poison message handling through dead letter queues
+
+#### 2.6 Testing and Validation Strategy
+
+1. **Functional Testing**
+   - Verify ordering guarantees within partitions
+   - Test exactly-once processing semantics
+   - Validate backpressure mechanisms
+
+2. **Fault Injection**
+   - Simulate broker failures and network partitions
+   - Test consumer crashes mid-transaction
+   - Verify recovery from disk failures
+
+3. **Performance Testing**
+   - Measure maximum sustainable throughput
+   - Evaluate latency under various loads
+   - Profile memory and CPU usage
+
+4. **Correctness Verification**
+   - Formal verification of critical protocols
+   - End-to-end data integrity checks
+   - Long-running stability tests

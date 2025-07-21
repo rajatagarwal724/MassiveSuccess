@@ -1,0 +1,92 @@
+# CS Fundamentals & Java Concepts
+
+## Memory Management
+
+### Paging
+- **Definition**: Memory management scheme that eliminates need for contiguous allocation
+- **Key Points**:
+  - Divides memory into fixed-size blocks (pages/frames)
+  - Enables virtual memory through page tables
+  - Reduces external fragmentation
+  - Allows demand paging
+
+### Thrashing
+- **Definition**: Performance degradation due to excessive paging
+- **Causes**:
+  - Insufficient memory for working set
+  - Poor page replacement
+  - Too many processes
+- **Solutions**:
+  - Add more RAM
+  - Better page replacement (e.g., LRU)
+  - Adjust process scheduling
+
+## Process & Threads
+
+### Process
+- Self-contained execution environment
+- Has its own memory space
+- Resource intensive
+- IPC required for communication
+
+### Thread
+- Lightweight process
+- Shares process resources
+- Faster context switching
+- Easier communication via shared memory
+
+## Synchronization
+
+### Mutex
+- Mutual exclusion lock
+- Binary state (locked/unlocked)
+- Only owner can release
+- Protects critical sections
+
+### Semaphore
+- Counter-based synchronization
+- Types: Binary & Counting
+- Operations: P() and V()
+- Manages resource pools
+
+### Java Specifics
+
+### final
+- Variables: Constants (cannot be reassigned)
+- Methods: Cannot be overridden
+- Classes: Cannot be extended
+- Parameters: Reference cannot be changed
+
+### finally
+- Always executes (except System.exit())
+- Used for cleanup
+- Runs even after return/exception
+- Part of try-catch-finally
+
+### finalize()
+- Called by GC before object collection
+- Deprecated in newer Java
+- Unreliable for cleanup
+- Better alternatives exist
+
+### Garbage Collection
+- Automatic memory management
+- **Algorithms**:
+  - Serial GC
+  - Parallel GC
+  - CMS
+  - G1
+  - ZGC/Shenandoah
+- **Generations**:
+  - Young (Eden + Survivor)
+  - Old
+  - Permanent (Metaspace)
+- **Collections**:
+  - Minor GC (Young gen)
+  - Major/Full GC (Old gen)
+
+## Best Practices
+- Prefer try-with-resources over finalize()
+- Use final for immutable objects
+- Keep synchronized blocks small
+- Understand GC behavior for performance tuning

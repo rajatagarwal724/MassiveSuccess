@@ -1,0 +1,352 @@
+# Apache Iceberg: Architecture and System Design
+
+## 1. Introduction
+
+Apache Iceberg is an open-source table format for huge analytic datasets. 
+Designed at Netflix and later donated to the Apache Software Foundation, 
+Iceberg addresses fundamental limitations in traditional data lake approaches, 
+particularly with Hive tables. 
+It offers a high-performance table format that works just like a SQL table 
+but organizes data files in cloud storage for optimal performance and reliability.
+
+## 2. Problem Space and Core Value Proposition
+
+### 2.1 Problems with Traditional Data Lakes
+- **Consistency issues**: No atomic updates or ACID guarantees
+- **Performance limitations**: Full scans required for queries
+- **Schema evolution challenges**: Hard to add/change columns
+- **Partition evolution problems**: Cannot change how data is partitioned
+- **File management complexity**: No optimized file layout control
+
+### 2.2 Value Proposition
+- **ACID transactions**: Ensures data consistency across concurrent reads/writes
+- **Schema evolution**: Can add, drop, rename or reorder fields without table rewrites
+- **Hidden partitioning**: Separates physical data organization from table definition
+- **Time travel**: Query data as of specific points in time
+- **Partition evolution**: Change partition schemes without data reorganization
+- **Performance optimizations**: File pruning, metadata indexing, statistics
+
+## 3. High-Level Architecture
+
+### 3.1 Core Concepts
+
+#### 3.1.1 Table Format Components
+1. **Metadata Layer**: A series of JSON metadata files that track:
+   - Table schema
+   - Partition spec
+   - Custom properties
+   - Snapshots
+   - Manifest files
+   - Data files
+   
+2. **Snapshot**: A point-in-time view of the table data
+   - Each snapshot represents a complete, consistent table state
+   - Immutable record with catalog metadata
+   
+3. **Manifest List**: Points to manifest files that make up a snapshot
+   - Contains high-level statistics
+   - Tracks added/existing/deleted manifests
+   
+4. **Manifest Files**: Lists of data files in a snapshot
+   - Contain partition data and file statistics
+   - Track added/existing/deleted data files
+   
+5. **Data Files**: The actual data stored in formats like Parquet, ORC, or Avro
+
+#### 3.1.2 Key Operations
+1. **Read Path**: Uses metadata to efficiently locate relevant data files
+2. **Write Path**: Creates new snapshots without interfering with reads
+3. **Compaction**: Optimizes files for better read performance
+4. **Expiration**: Removes old snapshots while maintaining data integrity
+
+### 3.2 Logical Structure
+
+                         ┌───────────┐
+                         │  Catalog  │
+                         └─────┬─────┘
+                               │
+                               v
+                        ┌──────────────┐
+                        │Table Metadata│
+                        └────────┬─────┘
+                                │
+                                v
+                        ┌──────────────┐
+                        │  Snapshots   │
+                        └────────┬─────┘
+                                │
+                                v
+                        ┌──────────────┐
+                        │ Manifest Lists│
+                        └────────┬─────┘
+                                │
+                                v
+                        ┌──────────────┐
+                        │  Manifests   │
+                        └────────┬─────┘
+                                │
+                                v
+                        ┌──────────────┐
+                        │  Data Files  │
+                        └──────────────┘
+
+## 4. Detailed Architecture Components
+
+### 4.1 Table Metadata
+
+The table metadata file is the entry point to an Iceberg table. It contains:
+
+- **Format version**: The Iceberg specification version
+- **UUID**: A unique table identifier
+- **Location**: The root location of the table
+- **Last sequence number**: Tracks the latest operation
+- **Last updated timestamp**: When the metadata was last changed
+- **Current schema**: The current table schema definition
+- **Partition spec**: How the table is partitioned
+- **Default sort order**: The default ordering of data
+- **Snapshots**: List of valid table states
+- **Snapshot log**: History of snapshot changes
+- **Metadata log**: History of metadata changes
+
+This metadata architecture enables atomic updates by simply replacing the pointer to the latest metadata file in the catalog.
+
+### 4.2 Snapshots
+
+Snapshots provide a point-in-time view of the table and are immutable. Each snapshot contains:
+
+- **Snapshot ID**: Unique identifier for the snapshot
+- **Parent ID**: Reference to the parent snapshot
+- **Timestamp**: When the snapshot was created
+- **Manifest list location**: Pointer to the manifest list
+- **Summary**: Operation that created the snapshot
+- **Schema ID**: The schema used for this snapshot
+
+Snapshots form a directed acyclic graph (DAG) that allows concurrent operations and branching histories for features like time travel and rollbacks.
+
+### 4.3 Manifest Lists and Manifests
+
+**Manifest Lists** are metadata files that contain:
+- References to all manifest files in a snapshot
+- Summary statistics like record count, file size
+- Partitioning information for data pruning
+
+**Manifest Files** contain:
+- Data file metadata (path, format, size, creation time)
+- Per-column statistics (min/max values, null counts)
+- Status flags indicating whether files were added, existing, or deleted
+
+This two-level structure provides efficient filtering during query planning.
+
+### 4.4 Data Files
+
+Data files contain the actual table data stored in columnar formats like:
+- Apache Parquet (most common)
+- Apache ORC
+- Apache Avro
+
+Each data file includes embedded statistics that Iceberg leverages for query planning.
+
+## 5. Key Technical Features
+
+### 5.1 Schema Evolution
+
+Iceberg supports schema evolution operations:
+
+- **Add**: Adds a new column
+- **Drop**: Removes an existing column
+- **Rename**: Changes a column name
+- **Reorder**: Changes column order
+- **Type conversion**: Changes data type with compatible conversions
+
+This is implemented via schema versioning, where each schema version has a unique ID. 
+The table tracks all schema versions, allowing old data files to be read with their original schema.
+
+### 5.2 Partition Evolution
+
+Partitioning in Iceberg is hidden from users and can be changed without rewriting data.
+
+**Partition specs** define:
+- Transform functions (identity, bucket, truncate, year, month, day, hour)
+- Source columns
+- Target partition field names
+
+Multiple partition specs can exist in a table, with each data file assigned to a spec version.
+
+### 5.3 Time Travel
+
+Iceberg supports time travel queries in two ways:
+- **Snapshot ID**: `SELECT * FROM table VERSION AS OF 123`
+- **Timestamp**: `SELECT * FROM table FOR TIMESTAMP AS OF '2021-01-01 00:00:00'`
+
+Implementation uses the snapshot log to find the appropriate snapshot and reads data accordingly.
+
+### 5.4 File Pruning and Query Optimization
+
+Iceberg uses a multi-level approach to minimize data reads:
+1. **Manifest list pruning**: Filters manifests based on partition boundaries
+2. **Manifest pruning**: Uses file metadata to skip irrelevant manifest files
+3. **Data file pruning**: Uses statistics to skip data files
+4. **In-file pruning**: Leverages columnar format features to skip row groups
+
+### 5.5 ACID Transactions
+
+ACID compliance is achieved through:
+- **Atomicity**: Metadata-driven atomic operations
+- **Consistency**: Schema validation and constraints
+- **Isolation**: Snapshot isolation by default 
+- **Durability**: All operations create new immutable files
+
+Optimistic concurrency control is used to handle concurrent modifications.
+
+## 6. Implementation Architecture
+
+### 6.1 APIs and Integration
+
+Iceberg offers multiple API layers:
+- **Core Java API**: Low-level table operations
+- **Spark SQL Extensions**: Spark-specific integration
+- **Flink Integration**: For stream processing
+- **Hive Integration**: For legacy systems
+- **Presto/Trino Integration**: For interactive analytics
+
+### 6.2 Catalog Services
+
+Catalogs manage table locations and metadata pointers. Supported catalog implementations:
+
+1. **Hive Metastore**: Uses Hive's metastore for compatibility
+2. **JDBC**: Stores metadata in relational databases
+3. **Hadoop**: Uses HDFS for metadata storage
+4. **REST**: Allows remote catalog operations via HTTP
+5. **AWS Glue**: Native AWS integration
+6. **Nessie**: Git-like versioning for data
+
+### 6.3 Commit Architecture
+
+The commit process follows this pattern:
+1. Read current table metadata
+2. Stage changes (new data files, deleted files)
+3. Commit new metadata via optimistic concurrency
+4. Retry on conflicts
+
+This architecture enables atomic commits without locking.
+
+## 7. Performance Optimizations
+
+### 7.1 Data Layout Optimization
+
+- **File Size Targeting**: ~512MB files balance read/write costs
+- **Sort Order**: Data clustering for locality
+- **Z-Order**: Multi-dimensional clustering
+- **Data Tiering**: Hot/warm/cold data organization
+
+### 7.2 Metadata Optimization
+
+- **Bloom Filters**: Fast negative lookups
+- **Position Deltas**: Reduce storage overhead for small changes
+- **Statistics**: Min/max values for each column
+- **Vectorization**: Memory-efficient processing
+
+### 7.3 Compaction
+
+Automatic and manual compaction strategies:
+- **Bin-packing**: Combines small files
+- **Sort-based**: Reorganizes data by sort keys
+- **Z-order**: Multi-column organization
+
+## 8. Reliability and Fault Tolerance
+
+### 8.1 Data Integrity
+
+- **Metadata checksums**: Validates file integrity
+- **Schema validation**: Ensures type safety
+- **Snapshot isolation**: Prevents dirty reads
+
+### 8.2 Recovery Mechanisms
+
+- **Metadata history**: Previous states can be restored
+- **Snapshot history**: Can roll back to previous snapshots
+- **Orphan file cleanup**: Background processes remove unused files
+
+## 9. Monitoring and Operations
+
+### 9.1 Table Maintenance
+
+- **Snapshots expiration**: Removes old snapshots
+- **Orphan file removal**: Cleans up unused data files
+- **Metadata optimization**: Consolidates metadata files
+
+### 9.2 Monitoring Metrics
+
+- **Snapshot statistics**: Size, record count, file count
+- **Operation latency**: Commit timing
+- **Scan efficiency**: Files/bytes scanned vs. total
+
+## 10. Use Cases and Applications
+
+### 10.1 Data Lakes
+
+- **Query engines**: Spark, Presto, Trino
+- **Processing frameworks**: Flink, Beam
+- **Streaming integration**: Change data capture
+
+### 10.2 Data Warehousing
+
+- **Dimensional models**: Star/snowflake schemas
+- **OLAP workloads**: Analytical processing
+
+### 10.3 Stream Processing
+
+- **Upserts**: Merge operations for streaming data
+- **CDC processing**: Change data capture integration
+- **Event sourcing**: Historical event storage
+
+## 11. Comparison with Other Technologies
+
+### 11.1 Apache Hudi
+
+- **Approach**: Record-level indexing vs. Iceberg's file-level metadata
+- **Strengths**: Better for record-level updates
+- **Weaknesses**: More complex, higher overhead
+
+### 11.2 Delta Lake
+
+- **Approach**: Transaction log vs. Iceberg's snapshot model
+- **Strengths**: Tight Spark integration
+- **Weaknesses**: Less flexible query engine support
+
+### 11.3 Traditional Hive Tables
+
+- **Approach**: Directory-based partitioning vs. Iceberg's hidden partitioning
+- **Strengths**: Simplicity
+- **Weaknesses**: No consistency guarantees, poor performance
+
+## 12. Future Directions
+
+- **Materialized views**: Query acceleration
+- **Advanced indexing**: Additional index types
+- **Machine learning metadata**: ML model tracking
+- **Streaming improvements**: Lower latency operations
+- **Enhanced security**: Row/column level security
+
+## 13. Conclusion
+
+Apache Iceberg represents a significant advancement in data lake architecture, 
+providing a robust foundation for large-scale analytics. 
+Its architecture solves fundamental problems with traditional data lakes while providing 
+a path for future innovation in data management.
+
+The combination of ACID transactions, schema evolution, hidden partitioning, and performance optimizations 
+makes Iceberg particularly suitable for modern cloud data architectures where reliability and flexibility 
+are paramount.
+
+
+
+
+✅ What Iceberg Is ?
+- A table format specification
+- A set of APIs and libraries for engines to interact with tables following that specification
+
+❌ What Iceberg is not
+- A storage engine
+- An execution engine
+- A service

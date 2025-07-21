@@ -1,0 +1,108 @@
+Sample Job - Agent Segment Report Job
+As per customer's communication they will be making roughly 300k calls a day
+Let's just assume there is just 1 record per call (can be more)
+For a file with 300K records in the CSV file, Size =~ 130MB
+Let's just assume that the calls are roughly distributed over 24 hours
+
+Job runs every 10 minutes
+Total time period: 24 hours
+Final data: 300K records = 130MB
+Data is gradually filled over 24 hours
+Jobs per day = 1440 minutes ÷ 10 minutes = 144 jobs per day
+Records per job = 300,000 ÷ 144 ≈ 2,083 records per job
+Data per job = 130MB ÷ 144 ≈ 0.903MB per job
+Now, for each job, we're uploading a complete file that grows with each run:
+Job 1: 0.903MB
+Job 2: 1.806MB
+Job 3: 2.709MB
+And so on...
+Total data transfer for one destination (S3 or SFTP):
+This is an arithmetic sequence where:
+First term (a) = 0.903MB
+Last term (l) = 130MB
+Number of terms (n) = 144
+Sum = n(a + l)/2
+Sum = 144(0.903 + 130)/2
+Sum = 144 × 130.903/2
+Sum = 9,425.016MB
+Since we're uploading to both S3 and SFTP:
+Total data transfer = 9,425.016MB × 2 = 18,850.032MB
+This is approximately 18.85GB per day
+
+So it is 18.85GB per day for just 1 Job without Zip and we have 2 more jobs.
+approximately 
+57GB without Zip per day 
+1710GB without Zip per month
+
+with ZIP 80 percent reduction in size
+11.4GB with Zip per day
+342GB with Zip per day
+
+
+
+
+I'll help you calculate the outbound data transfer charges for your scenario. Let me break this down step by step:
+First, let's understand the data flow:
+Job runs every 10 minutes
+Total time period: 24 hours
+Final data: 300K records = 130MB
+Data is gradually filled over 24 hours
+Let's calculate the number of jobs in 24 hours:
+24 hours = 1440 minutes
+Jobs per day = 1440 minutes ÷ 10 minutes = 144 jobs per day
+Since the data is gradually filled, we need to calculate the data transfer for each interval:
+Total records per day: 300,000
+Records per job = 300,000 ÷ 144 ≈ 2,083 records per job
+Total data per day: 130MB
+Data per job = 130MB ÷ 144 ≈ 0.903MB per job
+Total outbound data transfer in 24 hours:
+Each job uploads to both S3 and SFTP
+Data per job: 0.903MB
+Number of jobs: 144
+Total data transfer = 0.903MB × 144 × 2 (S3 + SFTP) = 260.064MB
+Therefore, the total outbound data transfer in 24 hours would be approximately 260.064MB (or about 0.26GB).
+This calculation assumes:
+The data grows linearly over time
+Each job uploads the same amount of data to both S3 and SFTP
+The file size is proportional to the number of records
+Would you like me to create a file to document these calculations and assumptions for future reference?
+
+
+
+Ah, this is a crucial detail that changes the calculation significantly! Let me recalculate with this new information:
+Job runs every 10 minutes
+Each job creates a new complete file (not appending)
+Total time period: 24 hours
+Final data: 300K records = 130MB
+Data is gradually filled over 24 hours
+Let's recalculate:
+Number of jobs in 24 hours:
+24 hours = 1440 minutes
+Jobs per day = 1440 minutes ÷ 10 minutes = 144 jobs per day
+Since each job creates a new complete file, we need to calculate the growing file size for each job:
+Total records per day: 300,000
+Records per job = 300,000 ÷ 144 ≈ 2,083 records per job
+Total data per day: 130MB
+Data per job = 130MB ÷ 144 ≈ 0.903MB per job
+Now, for each job, we're uploading a complete file that grows with each run:
+Job 1: 0.903MB
+Job 2: 1.806MB
+Job 3: 2.709MB
+And so on...
+Total data transfer for one destination (S3 or SFTP):
+This is an arithmetic sequence where:
+First term (a) = 0.903MB
+Last term (l) = 130MB
+Number of terms (n) = 144
+Sum = n(a + l)/2
+Sum = 144(0.903 + 130)/2
+Sum = 144 × 130.903/2
+Sum = 9,425.016MB
+Since we're uploading to both S3 and SFTP:
+Total data transfer = 9,425.016MB × 2 = 18,850.032MB
+This is approximately 18.85GB per day
+This is significantly higher than the previous calculation because:
+Each job creates a new complete file
+The file size grows with each job
+We're uploading to two destinations (S3 and SFTP)
+Would you like me to create a file documenting these calculations and assumptions for future reference?

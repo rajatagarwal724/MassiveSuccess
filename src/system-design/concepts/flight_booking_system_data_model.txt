@@ -1,0 +1,694 @@
+# Flight Booking System: Data Model & Database Design
+
+## 1. Database Selection Strategy
+
+The flight booking system uses a polyglot persistence approach, selecting different database technologies based on specific service requirements:
+
+### 1.1 Primary Databases
+
+- **PostgreSQL**: For transactional data requiring ACID compliance
+  - User accounts
+  - Bookings and reservations
+  - Payment transactions
+  - Flight schedules and inventory
+
+- **MongoDB**: For flexible schema requirements
+  - User preferences and profiles
+  - Search results caching
+  - Flight details and rich content
+  - Travel documents
+
+- **Redis**: For high-performance caching and temporary data
+  - Session management
+  - Search result caching
+  - Rate limiting
+  - Flight availability cache
+  - Distributed locks
+
+- **Elasticsearch**: For search functionality
+  - Flight search indexing
+  - Full-text search capabilities
+  - Faceted search for filtering
+
+- **Time-series DB (InfluxDB/TimescaleDB)**: For metrics and monitoring
+  - System performance metrics
+  - Business KPIs
+  - Flight price history
+
+### 1.2 Database Distribution Strategy
+
+- **Geo-distributed deployment**: Data centers in multiple regions
+- **Read replicas**: For high-read workloads (search, user profiles)
+- **Sharding**: For high-write workloads (bookings, analytics)
+- **Global tables**: For reference data (airports, airlines, aircraft types)
+
+## 2. Core Data Entities and Relationships
+
+### 2.1 User Domain
+
+```
+User
+  ├── UserProfile
+  ├── UserAddress
+  ├── UserPaymentMethod
+  ├── FrequentFlyerProgram
+  └── TravelDocument
+```
+
+### 2.2 Flight and Inventory Domain
+
+```
+Airline
+  ├── Aircraft
+  ├── Flight
+  │    ├── FlightSchedule
+  │    ├── FlightStatus
+  │    └── FlightPrice
+  ├── Route
+  └── AirportInfo
+```
+
+### 2.3 Booking Domain
+
+```
+Booking
+  ├── BookingSegment
+  ├── Passenger
+  ├── Seat
+  ├── AncillaryService
+  ├── Payment
+  │    └── Refund
+  └── CheckIn
+       └── BoardingPass
+```
+
+### 2.4 Search Domain
+
+```
+SearchRequest
+  ├── SearchResult
+  └── FlightOffer
+```
+
+## 3. Database Schema Design
+
+### 3.1 PostgreSQL Schema (Transactional Data)
+
+#### Users Schema
+
+```sql
+CREATE TABLE users (
+  user_id UUID PRIMARY KEY,
+  email VARCHAR(255) UNIQUE NOT NULL,
+  phone_number VARCHAR(20),
+  password_hash VARCHAR(255) NOT NULL,
+  first_name VARCHAR(100) NOT NULL,
+  last_name VARCHAR(100) NOT NULL,
+  date_of_birth DATE,
+  nationality VARCHAR(50),
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  last_login TIMESTAMP,
+  account_status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+  two_factor_enabled BOOLEAN DEFAULT FALSE
+);
+
+CREATE TABLE user_addresses (
+  address_id UUID PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES users(user_id),
+  address_type VARCHAR(20) NOT NULL,
+  address_line1 VARCHAR(255) NOT NULL,
+  address_line2 VARCHAR(255),
+  city VARCHAR(100) NOT NULL,
+  state VARCHAR(100),
+  postal_code VARCHAR(20) NOT NULL,
+  country VARCHAR(100) NOT NULL,
+  is_default BOOLEAN DEFAULT FALSE,
+  UNIQUE(user_id, address_type, is_default)
+);
+
+CREATE TABLE user_payment_methods (
+  payment_method_id UUID PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES users(user_id),
+  payment_type VARCHAR(50) NOT NULL,
+  card_type VARCHAR(50),
+  last_four VARCHAR(4),
+  token VARCHAR(255) NOT NULL,
+  is_default BOOLEAN DEFAULT FALSE,
+  expiry_date DATE,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+```
+
+#### Flight Inventory Schema
+
+```sql
+CREATE TABLE airlines (
+  airline_code VARCHAR(3) PRIMARY KEY,
+  airline_name VARCHAR(100) NOT NULL,
+  logo_url VARCHAR(255),
+  country_code VARCHAR(2) NOT NULL,
+  active BOOLEAN DEFAULT TRUE
+);
+
+CREATE TABLE airports (
+  airport_code VARCHAR(3) PRIMARY KEY,
+  airport_name VARCHAR(255) NOT NULL,
+  city VARCHAR(100) NOT NULL,
+  country VARCHAR(100) NOT NULL,
+  latitude DECIMAL(9, 6) NOT NULL,
+  longitude DECIMAL(9, 6) NOT NULL,
+  timezone VARCHAR(50) NOT NULL
+);
+
+CREATE TABLE flights (
+  flight_id UUID PRIMARY KEY,
+  airline_code VARCHAR(3) NOT NULL REFERENCES airlines(airline_code),
+  flight_number VARCHAR(10) NOT NULL,
+  origin VARCHAR(3) NOT NULL REFERENCES airports(airport_code),
+  destination VARCHAR(3) NOT NULL REFERENCES airports(airport_code),
+  departure_time TIMESTAMP NOT NULL,
+  arrival_time TIMESTAMP NOT NULL,
+  aircraft_type VARCHAR(50),
+  status VARCHAR(20) DEFAULT 'SCHEDULED',
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  UNIQUE(airline_code, flight_number, departure_time)
+);
+
+CREATE TABLE flight_prices (
+  price_id UUID PRIMARY KEY,
+  flight_id UUID NOT NULL REFERENCES flights(flight_id),
+  cabin_class VARCHAR(20) NOT NULL,
+  booking_class VARCHAR(1) NOT NULL,
+  base_price DECIMAL(10, 2) NOT NULL,
+  tax_amount DECIMAL(10, 2) NOT NULL,
+  currency VARCHAR(3) NOT NULL DEFAULT 'USD',
+  available_seats INTEGER NOT NULL,
+  refundable BOOLEAN NOT NULL DEFAULT FALSE,
+  fare_basis VARCHAR(20),
+  last_updated TIMESTAMP NOT NULL DEFAULT NOW(),
+  UNIQUE(flight_id, cabin_class, booking_class)
+);
+```
+
+#### Booking Schema
+
+```sql
+CREATE TABLE bookings (
+  booking_id UUID PRIMARY KEY,
+  user_id UUID REFERENCES users(user_id),
+  pnr VARCHAR(6) UNIQUE NOT NULL,
+  booking_status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+  total_amount DECIMAL(10, 2) NOT NULL,
+  currency VARCHAR(3) NOT NULL DEFAULT 'USD',
+  payment_status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+  contact_email VARCHAR(255) NOT NULL,
+  contact_phone VARCHAR(20),
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  last_updated TIMESTAMP NOT NULL DEFAULT NOW(),
+  ip_address VARCHAR(45),
+  agent_id UUID
+);
+
+CREATE TABLE booking_segments (
+  segment_id UUID PRIMARY KEY,
+  booking_id UUID NOT NULL REFERENCES bookings(booking_id),
+  flight_id UUID NOT NULL REFERENCES flights(flight_id),
+  cabin_class VARCHAR(20) NOT NULL,
+  booking_class VARCHAR(1) NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'CONFIRMED',
+  fare_basis VARCHAR(20),
+  baggage_allowance JSONB
+);
+
+CREATE TABLE passengers (
+  passenger_id UUID PRIMARY KEY,
+  booking_id UUID NOT NULL REFERENCES bookings(booking_id),
+  type VARCHAR(10) NOT NULL,
+  title VARCHAR(10),
+  first_name VARCHAR(100) NOT NULL,
+  last_name VARCHAR(100) NOT NULL,
+  date_of_birth DATE,
+  nationality VARCHAR(50),
+  passport_number VARCHAR(50),
+  passport_expiry DATE,
+  passport_country VARCHAR(50),
+  frequent_flyer_number VARCHAR(50)
+);
+
+CREATE TABLE seats (
+  seat_id UUID PRIMARY KEY,
+  booking_id UUID NOT NULL REFERENCES bookings(booking_id),
+  passenger_id UUID NOT NULL REFERENCES passengers(passenger_id),
+  segment_id UUID NOT NULL REFERENCES booking_segments(segment_id),
+  seat_number VARCHAR(5) NOT NULL,
+  seat_type VARCHAR(20),
+  price DECIMAL(10, 2),
+  status VARCHAR(20) NOT NULL DEFAULT 'RESERVED',
+  UNIQUE(segment_id, seat_number)
+);
+```
+
+#### Payment Schema
+
+```sql
+CREATE TABLE payments (
+  payment_id UUID PRIMARY KEY,
+  booking_id UUID NOT NULL REFERENCES bookings(booking_id),
+  user_id UUID REFERENCES users(user_id),
+  amount DECIMAL(10, 2) NOT NULL,
+  currency VARCHAR(3) NOT NULL DEFAULT 'USD',
+  payment_method_id UUID,
+  payment_status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+  gateway VARCHAR(50) NOT NULL,
+  gateway_transaction_id VARCHAR(100),
+  authorization_code VARCHAR(50),
+  error_code VARCHAR(50),
+  error_message TEXT,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  ip_address VARCHAR(45)
+);
+
+CREATE TABLE refunds (
+  refund_id UUID PRIMARY KEY,
+  payment_id UUID NOT NULL REFERENCES payments(payment_id),
+  amount DECIMAL(10, 2) NOT NULL,
+  currency VARCHAR(3) NOT NULL DEFAULT 'USD',
+  reason TEXT,
+  status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+  gateway_refund_id VARCHAR(100),
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  processed_at TIMESTAMP,
+  processed_by UUID REFERENCES users(user_id)
+);
+```
+
+### 3.2 MongoDB Collections (Document Data)
+
+#### User Profiles Collection
+
+```javascript
+{
+  "_id": "UUID",
+  "userId": "UUID",
+  "preferences": {
+    "seatPreference": "window",
+    "mealPreference": "vegetarian",
+    "preferredAirlines": ["AA", "UA"],
+    "preferredCabinClass": "economy",
+    "communicationPreferences": {
+      "emailMarketing": true,
+      "smsNotifications": true,
+      "pushNotifications": false
+    }
+  },
+  "travelDocuments": [
+    {
+      "documentId": "UUID",
+      "documentType": "passport",
+      "documentNumber": "ENCRYPTED_VALUE",
+      "issuingCountry": "US",
+      "expiryDate": "2028-05-15",
+      "holderName": "JOHN DOE"
+    }
+  ],
+  "frequentFlyerPrograms": [
+    {
+      "airlineCode": "AA",
+      "programName": "AAdvantage",
+      "membershipNumber": "ENCRYPTED_VALUE",
+      "tierStatus": "Gold"
+    }
+  ],
+  "searchHistory": [
+    {
+      "origin": "JFK",
+      "destination": "LAX",
+      "searchDate": "2025-05-01T10:30:00Z"
+    }
+  ],
+  "lastUpdated": "2025-06-01T15:20:30Z"
+}
+```
+
+#### Flight Details Collection
+
+```javascript
+{
+  "_id": "UUID",
+  "flightId": "UUID",
+  "airlineCode": "AA",
+  "flightNumber": "AA123",
+  "route": {
+    "origin": {
+      "code": "JFK",
+      "terminal": "4",
+      "city": "New York",
+      "country": "United States"
+    },
+    "destination": {
+      "code": "LAX",
+      "terminal": "5",
+      "city": "Los Angeles",
+      "country": "United States"
+    }
+  },
+  "schedule": {
+    "departureTime": "2025-06-15T08:30:00Z",
+    "arrivalTime": "2025-06-15T11:45:00Z",
+    "duration": 315,
+    "timezone": {
+      "departure": "America/New_York",
+      "arrival": "America/Los_Angeles"
+    }
+  },
+  "aircraft": {
+    "type": "Boeing 777-300ER",
+    "registration": "N123AA",
+    "amenities": ["WiFi", "Power", "IFE"],
+    "seatMap": "URL_TO_SEATMAP"
+  },
+  "status": {
+    "currentStatus": "SCHEDULED",
+    "lastUpdated": "2025-06-01T12:00:00Z"
+  },
+  "cabins": [
+    {
+      "cabinClass": "economy",
+      "seatsTotal": 200,
+      "seatsAvailable": 120,
+      "seatPitch": "31-32 inches",
+      "amenities": ["Meal", "Beverage"]
+    },
+    {
+      "cabinClass": "business",
+      "seatsTotal": 40,
+      "seatsAvailable": 15,
+      "seatPitch": "60 inches",
+      "amenities": ["Lie-flat Seat", "Premium Meal", "Lounge Access"]
+    }
+  ],
+  "baggagePolicy": {
+    "carryOn": {
+      "allowance": 1,
+      "maxWeight": "8kg",
+      "dimensions": "22 x 14 x 9 inches"
+    },
+    "checked": {
+      "allowance": 1,
+      "maxWeight": "23kg",
+      "dimensions": "62 linear inches",
+      "additionalFees": [
+        {
+          "bagNumber": 2,
+          "fee": 35.00,
+          "currency": "USD"
+        }
+      ]
+    }
+  }
+}
+```
+
+#### Search Cache Collection
+
+```javascript
+{
+  "_id": "UUID",
+  "searchHash": "SHA256_HASH_OF_SEARCH_PARAMS",
+  "searchParams": {
+    "origin": "JFK",
+    "destination": "LAX",
+    "departureDate": "2025-06-15",
+    "returnDate": "2025-06-22",
+    "adults": 2,
+    "children": 1,
+    "infants": 0,
+    "cabinClass": "economy"
+  },
+  "results": [
+    {
+      "offerId": "UUID",
+      "provider": "GDS_NAME",
+      "validatingAirline": "AA",
+      "price": {
+        "totalAmount": 856.34,
+        "currency": "USD",
+        "breakdown": {
+          "baseFare": 720.00,
+          "taxes": 136.34,
+          "fees": 0.00
+        }
+      },
+      "outbound": [
+        {
+          "flightId": "UUID",
+          "airlineCode": "AA",
+          "flightNumber": "AA123",
+          "departureTime": "2025-06-15T08:30:00Z",
+          "arrivalTime": "2025-06-15T11:45:00Z",
+          "origin": "JFK",
+          "destination": "LAX",
+          "duration": 315,
+          "cabinClass": "economy",
+          "bookingClass": "Q"
+        }
+      ],
+      "inbound": [
+        {
+          "flightId": "UUID",
+          "airlineCode": "AA",
+          "flightNumber": "AA456",
+          "departureTime": "2025-06-22T14:30:00Z",
+          "arrivalTime": "2025-06-22T22:45:00Z",
+          "origin": "LAX",
+          "destination": "JFK",
+          "duration": 315,
+          "cabinClass": "economy",
+          "bookingClass": "V"
+        }
+      ],
+      "fareRules": {
+        "refundable": false,
+        "changeFee": 200.00,
+        "cancellationFee": 200.00,
+        "fareExpiration": "2025-06-02T23:59:59Z"
+      },
+      "baggageAllowance": {
+        "carryOn": 1,
+        "checked": 1
+      }
+    }
+  ],
+  "created": "2025-06-01T15:45:23Z",
+  "expires": "2025-06-01T16:45:23Z",
+  "status": "COMPLETE",
+  "resultCount": 32
+}
+```
+
+### 3.3 Redis Data Structures
+
+#### Flight Availability Cache
+
+```
+# Key: flight:availability:{origin}:{destination}:{date}
+# Value: Sorted Set with score = price
+
+ZADD flight:availability:JFK:LAX:2025-06-15 85634 "AA123:Q:economy"
+ZADD flight:availability:JFK:LAX:2025-06-15 92150 "UA456:W:economy"
+ZADD flight:availability:JFK:LAX:2025-06-15 140000 "AA123:J:business"
+```
+
+#### User Session
+
+```
+# Key: session:{session_id}
+# Value: Hash
+
+HSET session:12345abc \
+  "user_id" "uuid-here" \
+  "email" "user@example.com" \
+  "last_activity" "2025-06-01T20:30:45Z" \
+  "search_history" "[{origin:JFK,destination:LAX,date:2025-06-15}]" \
+  "cart_id" "cart-uuid-here"
+```
+
+#### Rate Limiting
+
+```
+# Key: ratelimit:{ip_address}:{endpoint}
+# Value: Counter with expiry
+
+INCR ratelimit:192.168.1.1:search
+EXPIRE ratelimit:192.168.1.1:search 60
+```
+
+### 3.4 Elasticsearch Mapping (Search Index)
+
+```json
+{
+  "mappings": {
+    "properties": {
+      "flightId": { "type": "keyword" },
+      "airlineCode": { "type": "keyword" },
+      "flightNumber": { "type": "keyword" },
+      "origin": { "type": "keyword" },
+      "destination": { "type": "keyword" },
+      "departureTime": { "type": "date" },
+      "arrivalTime": { "type": "date" },
+      "duration": { "type": "integer" },
+      "stops": { "type": "integer" },
+      "availableClasses": { "type": "keyword" },
+      "lowestPrice": { "type": "float" },
+      "currency": { "type": "keyword" },
+      "location": {
+        "type": "geo_point"
+      },
+      "route": {
+        "type": "text",
+        "fields": {
+          "keyword": { "type": "keyword" }
+        }
+      },
+      "amenities": { "type": "keyword" },
+      "aircraft": { "type": "keyword" }
+    }
+  }
+}
+```
+
+## 4. Data Access Patterns
+
+### 4.1 Key Access Patterns
+
+1. **Flight Search**
+   - Query by origin, destination, dates, passengers, cabin class
+   - Sort by price, duration, departure time, arrival time
+   - Filter by airline, stops, price range
+
+2. **Booking Management**
+   - Retrieve booking by booking ID or PNR
+   - List bookings by user ID
+   - Update booking status
+
+3. **User Management**
+   - Retrieve user profile by ID or email
+   - Update user preferences
+   - Access payment methods
+
+4. **Payment Processing**
+   - Create payment record
+   - Update payment status
+   - Process refund
+
+5. **Flight Status**
+   - Get current status by flight number and date
+   - List affected bookings by flight ID
+
+### 4.2 Query Optimization
+
+1. **Indexing Strategy**
+   - B-tree indexes for equality and range queries
+   - Compound indexes for common query patterns
+   - Spatial indexes for location-based queries
+   - Text indexes for search functionality
+
+2. **Denormalization**
+   - Embedding frequently accessed related data
+   - Pre-computing and storing derived data
+   - Materializing views for complex aggregations
+
+3. **Caching**
+   - Cache search results with appropriate TTL
+   - Cache flight details and availability
+   - Cache user profiles and preferences
+
+## 5. Data Migration and Evolution
+
+### 5.1 Schema Evolution
+
+- **Backward compatible changes**: Add columns/fields with defaults
+- **Breaking changes**: Multi-phase deployment with versioning
+- **Database versioning**: Track schema versions in metadata
+
+### 5.2 Data Migration Strategies
+
+- **Online migrations**: For non-disruptive changes
+- **Dual-write pattern**: For critical data transitions
+- **Background data backfilling**: For new fields/columns
+- **Blue-green database deployment**: For major migrations
+
+### 5.3 Data Retention and Archiving
+
+- **Hot data**: Recent bookings, active users (in primary DB)
+- **Warm data**: Recent historical data (3-6 months, in read replicas)
+- **Cold data**: Older historical data (archived to data warehouse)
+- **Compliance data**: Retained according to regulatory requirements
+
+## 6. Database Security
+
+### 6.1 Data Protection
+
+- **Encryption at rest**: Database-level encryption
+- **Encryption in transit**: TLS for all connections
+- **Field-level encryption**: For sensitive data (passport numbers, payment info)
+- **Data masking**: For non-production environments
+
+### 6.2 Access Control
+
+- **Principle of least privilege**: Minimal necessary permissions
+- **Role-based access control**: For database users
+- **Row-level security**: For multi-tenant data
+- **Audit logging**: Track all sensitive data access
+
+### 6.3 Compliance Considerations
+
+- **PCI DSS**: For payment card data
+- **GDPR/CCPA**: For user personal data
+- **Industry regulations**: For travel data (PNR retention policies)
+
+## 7. Database Performance and Scalability
+
+### 7.1 Performance Optimization
+
+- **Query optimization**: Analyze and optimize slow queries
+- **Connection pooling**: Efficiently manage database connections
+- **Statement caching**: Reduce parsing overhead
+- **Resource allocation**: Proper CPU, memory, and disk configuration
+
+### 7.2 Scaling Strategies
+
+- **Vertical scaling**: Increase resources for database instances
+- **Horizontal scaling**: Add more database nodes
+- **Read-write splitting**: Offload reads to replicas
+- **Sharding**: Distribute data across multiple database instances
+
+### 7.3 Database Monitoring
+
+- **Performance metrics**: Query response time, throughput, resource utilization
+- **Health checks**: Connection count, replication lag, disk space
+- **Query analytics**: Identify slow queries and optimization opportunities
+- **Alerting**: Proactive notification of issues
+
+## 8. Disaster Recovery and High Availability
+
+### 8.1 High Availability Configuration
+
+- **Primary-replica setup**: Automatic failover
+- **Multi-AZ deployment**: Protect against infrastructure failures
+- **Read replicas**: For load distribution and redundancy
+
+### 8.2 Backup Strategy
+
+- **Regular automated backups**: Daily full backups
+- **Continuous incremental backups**: Point-in-time recovery
+- **Cross-region backup replication**: Geographic redundancy
+
+### 8.3 Disaster Recovery
+
+- **Recovery time objective (RTO)**: < 1 hour
+- **Recovery point objective (RPO)**: < 5 minutes
+- **Documented recovery procedures**: Step-by-step recovery playbooks
+- **Regular DR testing**: Validate recovery processes
