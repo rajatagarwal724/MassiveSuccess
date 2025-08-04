@@ -65,12 +65,12 @@ public class ValidParanthesesString {
     public static void main(String[] args) {
         var sol = new ValidParanthesesString();
 
-        System.out.println(
-                sol.checkValidString("()")
-        );
-        System.out.println(
-                sol.checkValidString("(*)")
-        );
+//        System.out.println(
+//                sol.checkValidString("()")
+//        );
+//        System.out.println(
+//                sol.checkValidString("(*)")
+//        );
         System.out.println(
                 sol.checkValidString("(*))")
         );
