@@ -1,10 +1,12 @@
 package companies.doordash.repeat;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 public class SudokuBoxExplanation {
 
     public static void main(String[] args) {
         System.out.println("=== Understanding 3x3 Box Calculation in Sudoku ===\n");
-
+        ObjectMapper mapper = new ObjectMapper();
         // Demonstrate box calculation for different positions
         demonstrateBoxCalculation();
 

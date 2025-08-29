@@ -9,6 +9,8 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 public class IncrementalBank {
 
     public class Account {
@@ -140,6 +142,7 @@ public class IncrementalBank {
                 true, LocalDateTime.now()
         );
         var toAccount = accounts.get(toAccountId);
+        toAccount.balance += pendingTx.amount;
         toAccount.addTx(transaction);
         pendingTx.isCompleted = true;
         pendingTx.lastUpdatedAt = LocalDateTime.now();

@@ -160,3 +160,72 @@ Code Reviews
    - Data-driven persuasion: Used metrics to convince architects to adopt CDC
    - Coalition building: Aligned stakeholders around shared goals
    - Long-term influence: Changed organizational perspective on analytics from cost center to value driver
+
+# Proactive Feedback (Soliciting & Providing)
+1) Code Review Culture Enhancement
+   - Systematic feedback: Established checklist-based reviews focusing on performance, security, maintainability
+   - Proactive solicitation: Added plugin to remind about pending code reviews in standups
+   - Constructive delivery: Developed approach where disagreements maintained psychological safety
+   - Follow-through: Implemented rule that resolution should be done by the person who commented
+   - Teaching moments: Used reviews as opportunities to share knowledge with junior engineers
+
+2) Cross-team Feedback Loops
+   - Upstream service engagement: Proactively reached out to teams that traditionally resisted analytics requests
+   - Data-driven feedback: Provided quantified metrics to architects showing CDC pipeline benefits
+   - Continuous improvement: Regularly solicited feedback from downstream consumers on analytics quality
+   - Documentation feedback: Created wikis and sought input to improve team knowledge sharing
+
+# Self Awareness
+1) Recognizing Team Dynamics Impact
+   - Situation recognition: Identified that toxic senior engineers were creating fear-based culture
+   - Personal reflection: Understood my role in creating psychological safety for junior members
+   - Skill gap acknowledgment: Recognized need to learn new tech stack for analytics modernization
+   - Growth opportunity identification: Saw mentoring as way to develop leadership skills
+
+2) Technical Limitations & Growth
+   - Knowledge gaps: Acknowledged unfamiliarity with new analytics stack but committed to learning
+   - Approach adaptation: Recognized when conventional infrastructure scaling wasn't optimal solution
+   - Feedback reception: Welcomed technical pushback during code reviews when justified
+   - Impact awareness: Understood how going "extra miles" for team members created positive culture
+
+# Conflict Resolution Strategies
+1) Architect Resistance to CDC Pipeline
+   - Data-driven approach: Created comprehensive metrics comparing pull vs push-based models
+   - Cost-benefit analysis: Quantified 30% infrastructure cost reduction and faster time-to-value
+   - Stakeholder alignment: Addressed concerns about release cycles and real-time analytics needs
+   - Proof of concept: Built working prototype to demonstrate feasibility and reduce resistance
+   - Collaborative solution: Worked with architects to create adoption plan addressing their concerns
+
+2) Upstream Service Conflicts
+   - Relationship building: Invested time in understanding upstream team constraints and priorities
+   - Technical compromise: Implemented requested field changes while educating on downstream impact
+   - Collaborative problem-solving: Used analytics requirements as opportunity to improve overall data quality
+   - Long-term partnership: Transformed adversarial relationship into collaborative partnership
+
+3) Team Culture Conflicts
+   - Inclusive approach: Created safe space for questions and learning, especially for junior engineers
+   - Leading by example: Demonstrated collaborative behavior that others began to emulate
+   - Gradual change: Focused on grassroots transformation rather than confrontational approach
+   - Measurable outcomes: Improved team environment led to better retention and productivity
+
+# High Sense of Ownership
+1) Analytics Stack Stabilization
+   - End-to-end responsibility: Took ownership of failing single-node service affecting business operations
+   - Strategic trade-offs: Made calculated decision to take short-term cost hit for long-term stability
+   - Proactive planning: Created phased approach to prevent future failures while building new architecture
+   - Business impact focus: Quantified ROI of preventing analytics outages vs investment required
+   - Follow-through: Delivered new analytics stack ahead of timeline using unfamiliar technology
+
+2) Legacy System Modernization
+   - Complete ownership: Took responsibility for migrating 38 views from legacy ETL to Glue-based analytics
+   - Quality commitment: Implemented detailed observability and reduced error rates by 45%
+   - Technical debt management: Created systematic approach to address accumulated technical debt
+   - Knowledge transfer: Ensured team could maintain and extend new systems through documentation and training
+   - Long-term vision: Developed sprint-by-sprint delivery plan ensuring sustainable migration
+
+3) Intern Development Program
+   - Personal investment: Mentored 4 interns with personalized development plans
+   - Results accountability: Ensured all interns could contribute meaningfully within 10 weeks
+   - Code quality ownership: Implemented pair programming that improved code quality by 40%
+   - Career impact: Took responsibility for their growth - 2 interns got promoted, others returned full-time
+   - Systematic approach: Created reusable mentorship framework benefiting future interns
